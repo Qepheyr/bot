@@ -294,6 +294,27 @@ bot.command('debug', async (ctx) => {
     );
 });
 
+
+// Add this right after the debug command
+bot.command('test', async (ctx) => {
+    await ctx.reply("✅ Bot is working! Your ID: " + ctx.from.id);
+});
+
+bot.command('help', async (ctx) => {
+    await ctx.reply(
+        "🤖 *Bot Commands*\n\n" +
+        "`/start` - Start the bot\n" +
+        "`/adminpanel` - Admin panel\n" +
+        "`/debug` - Debug info\n" +
+        "`/test` - Test if bot responds\n\n" +
+        "📱 *User Commands*\n" +
+        "- Use buttons to navigate\n" +
+        "- Join channels to access apps\n" +
+        "- Generate codes from apps",
+        { parse_mode: 'Markdown' }
+    );
+});
+
 async function showStartScreen(ctx) {
     const config = await db.collection('admin').findOne({ type: 'config' });
     const channels = config?.channels || [];
