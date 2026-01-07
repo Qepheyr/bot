@@ -1,7 +1,7 @@
 // ==========================================
 // TELEGRAM BOT - COMPLETE FIXED SOLUTION
 // ==========================================
-// Fixed: Database issues, channel/app management, contact user feature
+// Fixed: All bugs, proper flow, pagination, contact system
 // ==========================================
 
 const { Telegraf, Scenes, session, Markup } = require('telegraf');
@@ -56,6 +56,7 @@ const scenes = {
     
     // Channel scenes
     addChannelName: createScene('add_channel_name_scene'),
+    addChannelLink: createScene('add_channel_link_scene'),
     addChannelId: createScene('add_channel_id_scene'),
     
     // App scenes
@@ -67,14 +68,9 @@ const scenes = {
     addAppCodeMessage: createScene('add_app_code_message_scene'),
     
     // Contact user scenes
-    contactUser: createScene('contact_user_scene'),
-    contactUserId: createScene('contact_user_id_scene'),
     contactUserMessage: createScene('contact_user_message_scene'),
     
-    // Reply to user scene
-    replyToUser: createScene('reply_to_user_scene'),
-    
-    // Image and message scenes
+    // Edit scenes
     editStartImage: createScene('edit_start_image_scene'),
     editStartMessage: createScene('edit_start_message_scene'),
     editMenuImage: createScene('edit_menu_image_scene'),
@@ -82,6 +78,9 @@ const scenes = {
     
     // Timer scene
     editTimer: createScene('edit_timer_scene'),
+    
+    // Report to admin scene
+    reportToAdmin: createScene('report_to_admin_scene'),
     
     // Admin scenes
     addAdmin: createScene('add_admin_scene')
@@ -216,9 +215,29 @@ async function getUnjoinedChannels(userId) {
         
         for (const channel of config.channels) {
             try {
-                const member = await bot.telegram.getChatMember(channel.id, userId);
-                if (member.status === 'left' || member.status === 'kicked') {
-                    unjoined.push(channel);
+                // For private channels, try to get member status
+                if (channel.type === 'private') {
+                    try {
+                        const member = await bot.telegram.getChatMember(channel.id, userId);
+                        if (member.status === 'left' || member.status === 'kicked') {
+                            unjoined.push(channel);
+                        }
+                    } catch (error) {
+                        // If we can't check (bot not admin or user not in channel), assume not joined
+                        unjoined.push(channel);
+                    }
+                } else {
+                    // For public channels with username, we can always check
+                    if (channel.username) {
+                        try {
+                            const member = await bot.telegram.getChatMember(channel.id, userId);
+                            if (member.status === 'left' || member.status === 'kicked') {
+                                unjoined.push(channel);
+                            }
+                        } catch (error) {
+                            unjoined.push(channel);
+                        }
+                    }
                 }
             } catch (error) {
                 console.error(`Error checking channel ${channel.id}:`, error.message);
@@ -335,11 +354,11 @@ async function uploadToCloudinary(fileBuffer, folder = 'bot_images') {
 // Get Cloudinary URL with name
 function getCloudinaryUrlWithName(originalUrl, name) {
     try {
-        if (!originalUrl.includes('cloudinary.com')) return originalUrl;
+        if (!originalUrl.includes('cloudinary.com') || !originalUrl.includes('{name}')) return originalUrl;
         
         // Add text overlay for name
         const encodedName = encodeURIComponent(name);
-        return originalUrl.replace('/upload/', `/upload/l_text:Stalinist%20One_140_bold:${encodedName},co_rgb:00e5ff,g_center/`);
+        return originalUrl.replace('{name}', encodedName);
     } catch (error) {
         return originalUrl;
     }
@@ -357,6 +376,34 @@ async function saveToDatabase(collection, query, update, options = {}) {
     } catch (error) {
         console.error(`Database error in ${collection}:`, error);
         throw error;
+    }
+}
+
+// Get paginated users
+async function getPaginatedUsers(page = 1, limit = 20) {
+    try {
+        const skip = (page - 1) * limit;
+        const users = await db.collection('users')
+            .find({})
+            .sort({ joinedAt: -1 })
+            .skip(skip)
+            .limit(limit)
+            .toArray();
+        
+        const totalUsers = await db.collection('users').countDocuments();
+        const totalPages = Math.ceil(totalUsers / limit);
+        
+        return {
+            users,
+            page,
+            totalPages,
+            totalUsers,
+            hasNext: page < totalPages,
+            hasPrev: page > 1
+        };
+    } catch (error) {
+        console.error('Error getting paginated users:', error);
+        return { users: [], page: 1, totalPages: 0, totalUsers: 0, hasNext: false, hasPrev: false };
     }
 }
 
@@ -394,10 +441,17 @@ bot.start(async (ctx) => {
             await notifyAdmin(`🆕 *New User Joined*\nID: \`${userId}\`\nUser: ${userLink}`);
         }
         
+        // Always show start screen first
         await showStartScreen(ctx);
     } catch (error) {
         console.error('Start command error:', error);
-        await ctx.reply('❌ An error occurred. Please try again.');
+        await ctx.reply('❌ An error occurred. Please try again.\n\nClick "Report to Admin" below if issue persists.', {
+            reply_markup: {
+                inline_keyboard: [[
+                    { text: '⚠️ Report to Admin', callback_data: 'report_to_admin' }
+                ]]
+            }
+        });
     }
 });
 
@@ -427,60 +481,133 @@ async function showStartScreen(ctx) {
         // Check if user is admin
         const isUserAdmin = await isAdmin(userId);
         
-        // If user hasn't joined all channels
+        // Create buttons
+        const buttons = [];
+        
+        // Add channel buttons if there are unjoined channels
         if (unjoinedChannels.length > 0) {
+            unjoinedChannels.forEach(channel => {
+                const buttonText = channel.buttonLabel || `Join ${channel.title}`;
+                buttons.push([{ text: buttonText, url: channel.link }]);
+            });
+            
+            // Add verify button
+            buttons.push([{ text: '✅ Check Joined', callback_data: 'check_joined' }]);
+        } else {
+            // All channels joined - show menu button
+            buttons.push([{ text: '🎮 Go to Menu', callback_data: 'go_to_menu' }]);
+        }
+        
+        // Add admin button if admin
+        if (isUserAdmin) {
+            buttons.push([{ text: '👑 Admin Panel', callback_data: 'admin_panel' }]);
+        }
+        
+        // Add report button
+        buttons.push([{ text: '⚠️ Report to Admin', callback_data: 'report_to_admin' }]);
+        
+        await ctx.replyWithPhoto(startImage, {
+            caption: startMessage,
+            parse_mode: 'Markdown',
+            reply_markup: { inline_keyboard: buttons }
+        });
+        
+    } catch (error) {
+        console.error('Show start screen error:', error);
+        await ctx.reply('❌ An error occurred. Please try again.\n\nClick "Report to Admin" below if issue persists.', {
+            reply_markup: {
+                inline_keyboard: [[
+                    { text: '⚠️ Report to Admin', callback_data: 'report_to_admin' }
+                ]]
+            }
+        });
+    }
+}
+
+// Check Joined
+bot.action('check_joined', async (ctx) => {
+    try {
+        await ctx.deleteMessage().catch(() => {});
+        await showStartScreen(ctx);
+    } catch (error) {
+        console.error('Check joined error:', error);
+        await ctx.answerCbQuery('❌ Error checking channels');
+    }
+});
+
+// Go to Menu
+bot.action('go_to_menu', async (ctx) => {
+    try {
+        await ctx.deleteMessage().catch(() => {});
+        await showMainMenu(ctx);
+    } catch (error) {
+        console.error('Go to menu error:', error);
+        await ctx.answerCbQuery('❌ Error loading menu');
+    }
+});
+
+// Report to Admin
+bot.action('report_to_admin', async (ctx) => {
+    await ctx.reply('Please describe the issue you are facing:\n\nType "cancel" to cancel.');
+    await ctx.scene.enter('report_to_admin_scene');
+});
+
+scenes.reportToAdmin.on('text', async (ctx) => {
+    try {
+        if (ctx.message.text.toLowerCase() === 'cancel') {
+            await ctx.reply('❌ Report cancelled.');
+            await ctx.scene.leave();
+            return;
+        }
+        
+        const user = ctx.from;
+        const userInfo = user.username ? `@${user.username}` : user.first_name || `User ${user.id}`;
+        const reportMessage = `⚠️ *User Report*\n\nFrom: ${userInfo}\nID: \`${user.id}\`\n\nReport: ${ctx.message.text}`;
+        
+        await notifyAdmin(reportMessage);
+        await ctx.reply('✅ Your report has been sent to the admin team. Thank you!');
+        
+        await ctx.scene.leave();
+    } catch (error) {
+        console.error('Report to admin error:', error);
+        await ctx.reply('❌ Failed to send report.');
+        await ctx.scene.leave();
+    }
+});
+
+// ==========================================
+// MAIN MENU
+// ==========================================
+
+async function showMainMenu(ctx) {
+    try {
+        const user = ctx.from;
+        const userId = user.id;
+        
+        // First check if user has joined all channels
+        const unjoinedChannels = await getUnjoinedChannels(userId);
+        if (unjoinedChannels.length > 0) {
+            // Update user status
             await db.collection('users').updateOne(
                 { userId: userId },
                 { $set: { joinedAll: false } }
             );
             
-            // Create channel buttons
-            const buttons = unjoinedChannels.map(channel => {
-                const buttonText = channel.buttonLabel || `Join ${channel.title}`;
-                return [{ text: buttonText, url: channel.link }];
-            });
-            
-            // Add verify button
-            buttons.push([{ text: '✅ Check Joined', callback_data: 'check_joined' }]);
-            
-            // Add contact button for admin
-            if (isUserAdmin) {
-                buttons.push([{ text: '💬 Contact User', callback_data: 'admin_contact_user' }]);
-            }
-            
-            await ctx.replyWithPhoto(startImage, {
-                caption: startMessage,
-                parse_mode: 'Markdown',
-                reply_markup: { inline_keyboard: buttons }
+            await ctx.reply('⚠️ Please join all channels first!', {
+                reply_markup: {
+                    inline_keyboard: [[
+                        { text: '🔙 Back to Start', callback_data: 'back_to_start' }
+                    ]]
+                }
             });
             return;
         }
         
-        // User has joined all channels
-        const userData = await db.collection('users').findOne({ userId: userId });
-        if (!userData.joinedAll) {
-            await db.collection('users').updateOne(
-                { userId: userId },
-                { $set: { joinedAll: true } }
-            );
-            
-            const userLink = user.username ? `@${user.username}` : user.first_name || 'Unknown';
-            await notifyAdmin(`✅ *User Joined All Channels*\nID: \`${userId}\`\nUser: ${userLink}`);
-        }
-        
-        // Show main menu
-        await showMainMenu(ctx);
-    } catch (error) {
-        console.error('Show start screen error:', error);
-        await ctx.reply('❌ An error occurred. Please try again.');
-    }
-}
-
-// Show Main Menu
-async function showMainMenu(ctx) {
-    try {
-        const user = ctx.from;
-        const userId = user.id;
+        // Update user status to joined all
+        await db.collection('users').updateOne(
+            { userId: userId },
+            { $set: { joinedAll: true } }
+        );
         
         // Get configuration
         const config = await db.collection('admin').findOne({ type: 'config' });
@@ -497,11 +624,11 @@ async function showMainMenu(ctx) {
         let menuMessage = config?.menuMessage || DEFAULT_CONFIG.menuMessage;
         menuMessage = replaceVariables(menuMessage, userVars);
         
-        // Create app buttons
+        // Create app buttons (2 per row)
         const keyboard = [];
         
         if (apps.length === 0) {
-            keyboard.push([{ text: 'Coming Soon...', callback_data: 'no_apps' }]);
+            keyboard.push([{ text: '📱 No Apps Available', callback_data: 'no_apps' }]);
         } else {
             // Group apps 2 per row
             for (let i = 0; i < apps.length; i += 2) {
@@ -516,14 +643,14 @@ async function showMainMenu(ctx) {
             }
         }
         
-        // Add contact button for admin
+        // Add back button
+        keyboard.push([{ text: '🔙 Back to Start', callback_data: 'back_to_start' }]);
+        
+        // Add admin button if admin
         const isUserAdmin = await isAdmin(userId);
         if (isUserAdmin) {
-            keyboard.push([{ text: '💬 Contact User', callback_data: 'admin_contact_user' }]);
+            keyboard.push([{ text: '👑 Admin Panel', callback_data: 'admin_panel' }]);
         }
-        
-        // Add back button
-        keyboard.push([{ text: '🔙 Back', callback_data: 'back_to_start' }]);
         
         await ctx.replyWithPhoto(menuImage, {
             caption: menuMessage,
@@ -532,19 +659,16 @@ async function showMainMenu(ctx) {
         });
     } catch (error) {
         console.error('Show main menu error:', error);
-        await ctx.reply('❌ An error occurred. Please try again.');
+        await ctx.reply('❌ An error occurred. Please try again.', {
+            reply_markup: {
+                inline_keyboard: [[
+                    { text: '🔙 Back to Start', callback_data: 'back_to_start' },
+                    { text: '⚠️ Report to Admin', callback_data: 'report_to_admin' }
+                ]]
+            }
+        });
     }
 }
-
-// Check Joined Channels
-bot.action('check_joined', async (ctx) => {
-    try {
-        await ctx.deleteMessage().catch(() => {});
-        await showStartScreen(ctx);
-    } catch (error) {
-        console.error('Check joined error:', error);
-    }
-});
 
 // Back to Start
 bot.action('back_to_start', async (ctx) => {
@@ -553,6 +677,7 @@ bot.action('back_to_start', async (ctx) => {
         await showStartScreen(ctx);
     } catch (error) {
         console.error('Back to start error:', error);
+        await ctx.answerCbQuery('❌ Error');
     }
 });
 
@@ -642,10 +767,22 @@ bot.action(/^app_(.+)$/, async (ctx) => {
         if (app.image && app.image !== 'none') {
             await ctx.replyWithPhoto(app.image, {
                 caption: message,
-                parse_mode: 'Markdown'
+                parse_mode: 'Markdown',
+                reply_markup: {
+                    inline_keyboard: [[
+                        { text: '🔙 Back to Menu', callback_data: 'back_to_menu' }
+                    ]]
+                }
             });
         } else {
-            await ctx.reply(message, { parse_mode: 'Markdown' });
+            await ctx.reply(message, { 
+                parse_mode: 'Markdown',
+                reply_markup: {
+                    inline_keyboard: [[
+                        { text: '🔙 Back to Menu', callback_data: 'back_to_menu' }
+                    ]]
+                }
+            });
         }
         
         // Update user's cooldown
@@ -654,19 +791,15 @@ bot.action(/^app_(.+)$/, async (ctx) => {
             { $set: { [`codeTimestamps.${appId}`]: now } }
         );
         
-        // Show back button
-        await ctx.reply('🔙 Back to Menu', {
+    } catch (error) {
+        console.error('App selection error:', error);
+        await ctx.reply('❌ An error occurred. Please try again.', {
             reply_markup: {
                 inline_keyboard: [[
-                    { text: '🔙 Back', callback_data: 'back_to_menu' }
+                    { text: '🔙 Back to Menu', callback_data: 'back_to_menu' }
                 ]]
             }
         });
-        
-    } catch (error) {
-        console.error('App selection error:', error);
-        await ctx.reply('❌ An error occurred. Please try again.');
-        await showMainMenu(ctx);
     }
 });
 
@@ -684,6 +817,21 @@ bot.action('back_to_menu', async (ctx) => {
 // 🛡️ ADMIN PANEL
 // ==========================================
 
+// Admin panel from button
+bot.action('admin_panel', async (ctx) => {
+    try {
+        if (!await isAdmin(ctx.from.id)) {
+            return ctx.answerCbQuery('❌ You are not authorized');
+        }
+        
+        await showAdminPanel(ctx);
+    } catch (error) {
+        console.error('Admin panel error:', error);
+        await ctx.answerCbQuery('❌ Error loading admin panel');
+    }
+});
+
+// Admin command
 bot.command('admin', async (ctx) => {
     try {
         if (!await isAdmin(ctx.from.id)) {
@@ -706,7 +854,6 @@ async function showAdminPanel(ctx) {
             [{ text: '🖼️ Menu Image', callback_data: 'admin_menuimage' }, { text: '📝 Menu Message', callback_data: 'admin_menumessage' }],
             [{ text: '⏰ Code Timer', callback_data: 'admin_timer' }, { text: '📺 Manage Channels', callback_data: 'admin_channels' }],
             [{ text: '📱 Manage Apps', callback_data: 'admin_apps' }, { text: '👑 Manage Admins', callback_data: 'admin_manage_admins' }],
-            [{ text: '💬 Contact User', callback_data: 'admin_contact_user' }, { text: '🗑️ Delete Data', callback_data: 'admin_deletedata' }],
             [{ text: '🔄 Refresh', callback_data: 'admin_refresh' }]
         ];
         
@@ -814,52 +961,269 @@ scenes.broadcast.on('message', async (ctx) => {
 });
 
 // ==========================================
-// ADMIN FEATURES - USER STATS
+// ADMIN FEATURES - USER STATS WITH PAGINATION
 // ==========================================
 
 bot.action('admin_userstats', async (ctx) => {
     if (!await isAdmin(ctx.from.id)) return;
     
+    await showUserStatsPage(ctx, 1);
+});
+
+async function showUserStatsPage(ctx, page) {
     try {
-        const users = await db.collection('users').find({}).toArray();
-        const totalUsers = users.length;
+        const userData = await getPaginatedUsers(page, 20);
+        const users = userData.users;
+        const totalUsers = userData.totalUsers;
         const verifiedUsers = users.filter(u => u.joinedAll).length;
         const today = new Date();
         today.setHours(0, 0, 0, 0);
         const activeToday = users.filter(u => u.lastActive && new Date(u.lastActive) >= today).length;
         
-        let recentUsersText = '';
-        const recentUsers = users
-            .sort((a, b) => new Date(b.joinedAt || 0) - new Date(a.joinedAt || 0))
-            .slice(0, 5);
+        let usersText = `📊 *User Statistics*\n\n`;
+        usersText += `• Total Users: ${totalUsers}\n`;
+        usersText += `• Verified Users: ${verifiedUsers}\n`;
+        usersText += `• Active Today: ${activeToday}\n\n`;
+        usersText += `👥 *Users (Page ${page}/${userData.totalPages})*:\n\n`;
         
-        recentUsers.forEach((user, index) => {
-            const username = user.username ? `@${user.username}` : user.firstName || 'Unknown';
+        users.forEach((user, index) => {
+            const username = user.username ? `@${user.username}` : user.firstName || `User ${user.userId}`;
             const status = user.joinedAll ? '✅' : '❌';
-            recentUsersText += `${index + 1}. [${username}](tg://user?id=${user.userId}) ${status} `;
-            recentUsersText += `[💬](tg://user?id=${ctx.from.id}?start=contact_${user.userId})\n`;
+            const userNum = (page - 1) * 20 + index + 1;
+            usersText += `${userNum}. ${username} ${status} `;
+            usersText += `[💬](tg://user?id=${ctx.from.id}?start=contact_${user.userId})\n`;
         });
         
-        const text = `📊 *User Statistics*\n\n` +
-                     `• Total Users: ${totalUsers}\n` +
-                     `• Verified Users: ${verifiedUsers}\n` +
-                     `• Active Today: ${activeToday}\n\n` +
-                     `👥 *Recent Users (5)*:\n${recentUsersText}`;
+        const keyboard = [];
         
-        const keyboard = [[{ text: '🔙 Back', callback_data: 'admin_back' }]];
+        // Navigation buttons
+        if (userData.hasPrev || userData.hasNext) {
+            const navRow = [];
+            if (userData.hasPrev) {
+                navRow.push({ text: '◀️ Previous', callback_data: `users_page_${page - 1}` });
+            }
+            if (userData.hasNext) {
+                navRow.push({ text: 'Next ▶️', callback_data: `users_page_${page + 1}` });
+            }
+            keyboard.push(navRow);
+        }
         
-        await ctx.editMessageText(text, {
-            parse_mode: 'Markdown',
-            reply_markup: { inline_keyboard: keyboard }
-        });
+        keyboard.push([{ text: '🔙 Back', callback_data: 'admin_back' }]);
+        
+        if (ctx.callbackQuery) {
+            await ctx.editMessageText(usersText, {
+                parse_mode: 'Markdown',
+                reply_markup: { inline_keyboard: keyboard }
+            });
+        } else {
+            await ctx.reply(usersText, {
+                parse_mode: 'Markdown',
+                reply_markup: { inline_keyboard: keyboard }
+            });
+        }
     } catch (error) {
         console.error('User stats error:', error);
         await ctx.reply('❌ Failed to get user statistics.');
     }
+}
+
+// Pagination handlers
+bot.action(/^users_page_(\d+)$/, async (ctx) => {
+    if (!await isAdmin(ctx.from.id)) return;
+    
+    const page = parseInt(ctx.match[1]);
+    await showUserStatsPage(ctx, page);
+});
+
+// Handle contact from user stats
+bot.action(/^contact_user_(\d+)$/, async (ctx) => {
+    try {
+        const userId = ctx.match[1];
+        
+        // Store user ID in session
+        ctx.session.contactUser = {
+            userId: userId
+        };
+        
+        await ctx.reply(`Now send the message to user ID: ${userId}\n\nType "cancel" to cancel.`);
+        await ctx.scene.enter('contact_user_message_scene');
+    } catch (error) {
+        console.error('Contact user error:', error);
+        await ctx.answerCbQuery('❌ Error');
+    }
+});
+
+// Contact user message scene
+scenes.contactUserMessage.on(['text', 'photo', 'document'], async (ctx) => {
+    try {
+        if (!ctx.session.contactUser) {
+            await ctx.reply('❌ Session expired. Please start again.');
+            await ctx.scene.leave();
+            await showAdminPanel(ctx);
+            return;
+        }
+        
+        const targetUserId = ctx.session.contactUser.userId;
+        
+        if (ctx.message.text?.toLowerCase() === 'cancel') {
+            await ctx.reply('❌ Contact cancelled.');
+            delete ctx.session.contactUser;
+            await ctx.scene.leave();
+            await showAdminPanel(ctx);
+            return;
+        }
+        
+        // Try to send message
+        try {
+            if (ctx.message.photo) {
+                await ctx.telegram.sendPhoto(
+                    targetUserId,
+                    ctx.message.photo[ctx.message.photo.length - 1].file_id,
+                    {
+                        caption: ctx.message.caption || '',
+                        reply_markup: {
+                            inline_keyboard: [[
+                                { text: '📩 Reply to Admin', callback_data: `reply_to_admin_${ctx.from.id}` }
+                            ]]
+                        }
+                    }
+                );
+            } else if (ctx.message.document) {
+                await ctx.telegram.sendDocument(
+                    targetUserId,
+                    ctx.message.document.file_id,
+                    {
+                        caption: ctx.message.caption || '',
+                        reply_markup: {
+                            inline_keyboard: [[
+                                { text: '📩 Reply to Admin', callback_data: `reply_to_admin_${ctx.from.id}` }
+                            ]]
+                        }
+                    }
+                );
+            } else if (ctx.message.text) {
+                await ctx.telegram.sendMessage(
+                    targetUserId,
+                    ctx.message.text,
+                    {
+                        reply_markup: {
+                            inline_keyboard: [[
+                                { text: '📩 Reply to Admin', callback_data: `reply_to_admin_${ctx.from.id}` }
+                            ]]
+                        }
+                    }
+                );
+            }
+            
+            await ctx.reply(`✅ Message sent to user ID: ${targetUserId}`);
+            
+        } catch (error) {
+            await ctx.reply(`❌ Failed to send message: ${error.message}`);
+        }
+        
+        // Clear session
+        delete ctx.session.contactUser;
+        
+    } catch (error) {
+        console.error('Contact user message error:', error);
+        await ctx.reply('❌ An error occurred.');
+    }
+    
+    await ctx.scene.leave();
+    await showAdminPanel(ctx);
+});
+
+// Handle reply to admin
+bot.action(/^reply_to_admin_(.+)$/, async (ctx) => {
+    try {
+        const adminId = ctx.match[1];
+        
+        // Store admin ID in session
+        ctx.session.replyToAdmin = {
+            adminId: adminId
+        };
+        
+        await ctx.reply('Type your reply to the admin:\n\nType "cancel" to cancel.');
+    } catch (error) {
+        console.error('Reply to admin error:', error);
+        await ctx.answerCbQuery('❌ Error');
+    }
+});
+
+// Handle user reply messages
+bot.on('message', async (ctx) => {
+    try {
+        if (ctx.session?.replyToAdmin && !ctx.message.text?.startsWith('/')) {
+            const adminId = ctx.session.replyToAdmin.adminId;
+            const fromUser = ctx.from;
+            const userInfo = fromUser.username ? `@${fromUser.username}` : fromUser.first_name || `User ${fromUser.id}`;
+            
+            if (ctx.message.text?.toLowerCase() === 'cancel') {
+                await ctx.reply('❌ Reply cancelled.');
+                delete ctx.session.replyToAdmin;
+                return;
+            }
+            
+            // Send to admin
+            try {
+                if (ctx.message.photo) {
+                    await ctx.telegram.sendPhoto(
+                        adminId,
+                        ctx.message.photo[ctx.message.photo.length - 1].file_id,
+                        {
+                            caption: `📩 *Reply from user*\n\nFrom: ${userInfo}\nID: \`${fromUser.id}\`\n\n${ctx.message.caption || ''}`,
+                            parse_mode: 'Markdown',
+                            reply_markup: {
+                                inline_keyboard: [[
+                                    { text: '💬 Reply Back', callback_data: `contact_user_${fromUser.id}` }
+                                ]]
+                            }
+                        }
+                    );
+                } else if (ctx.message.document) {
+                    await ctx.telegram.sendDocument(
+                        adminId,
+                        ctx.message.document.file_id,
+                        {
+                            caption: `📩 *Reply from user*\n\nFrom: ${userInfo}\nID: \`${fromUser.id}\`\n\n${ctx.message.caption || ''}`,
+                            parse_mode: 'Markdown',
+                            reply_markup: {
+                                inline_keyboard: [[
+                                    { text: '💬 Reply Back', callback_data: `contact_user_${fromUser.id}` }
+                                ]]
+                            }
+                        }
+                    );
+                } else if (ctx.message.text) {
+                    await ctx.telegram.sendMessage(
+                        adminId,
+                        `📩 *Reply from user*\n\nFrom: ${userInfo}\nID: \`${fromUser.id}\`\n\n${ctx.message.text}`,
+                        {
+                            parse_mode: 'Markdown',
+                            reply_markup: {
+                                inline_keyboard: [[
+                                    { text: '💬 Reply Back', callback_data: `contact_user_${fromUser.id}` }
+                                ]]
+                            }
+                        }
+                    );
+                }
+                
+                await ctx.reply('✅ Your reply has been sent to the admin.');
+                delete ctx.session.replyToAdmin;
+                
+            } catch (error) {
+                await ctx.reply('❌ Failed to send reply. The admin may have blocked the bot.');
+                delete ctx.session.replyToAdmin;
+            }
+        }
+    } catch (error) {
+        console.error('Handle user reply error:', error);
+    }
 });
 
 // ==========================================
-// ADMIN FEATURES - START IMAGE
+// ADMIN FEATURES - START IMAGE (FIXED)
 // ==========================================
 
 bot.action('admin_startimage', async (ctx) => {
@@ -869,11 +1233,11 @@ bot.action('admin_startimage', async (ctx) => {
         const config = await db.collection('admin').findOne({ type: 'config' });
         const currentImage = config?.startImage || DEFAULT_CONFIG.startImage;
         
-        const text = `🖼️ *Start Image Management*\n\nCurrent Image:\n\`${currentImage}\`\n\nSelect an option:`;
+        const text = `🖼️ *Start Image Management*\n\nCurrent Image:\n\`${currentImage}\`\n\n*Supports {name} variable*\n\nSelect an option:`;
         
         const keyboard = [
-            [{ text: '✏️ Edit Image URL', callback_data: 'admin_edit_startimage' }, { text: '📤 Upload Image', callback_data: 'admin_upload_startimage' }],
-            [{ text: '🔄 Reset to Default', callback_data: 'admin_reset_startimage' }, { text: '🔙 Back', callback_data: 'admin_back' }]
+            [{ text: '✏️ Edit URL', callback_data: 'admin_edit_startimage_url' }, { text: '📤 Upload', callback_data: 'admin_upload_startimage' }],
+            [{ text: '🔄 Reset', callback_data: 'admin_reset_startimage' }, { text: '🔙 Back', callback_data: 'admin_back' }]
         ];
         
         await ctx.editMessageText(text, {
@@ -886,8 +1250,8 @@ bot.action('admin_startimage', async (ctx) => {
     }
 });
 
-bot.action('admin_edit_startimage', async (ctx) => {
-    await ctx.reply('Enter the new image URL:\n\nType "cancel" to cancel.');
+bot.action('admin_edit_startimage_url', async (ctx) => {
+    await ctx.reply('Enter the new image URL (supports {name} variable):\n\nType "cancel" to cancel.');
     await ctx.scene.enter('edit_start_image_scene');
 });
 
@@ -912,7 +1276,7 @@ scenes.editStartImage.on('text', async (ctx) => {
             { $set: { startImage: newUrl, updatedAt: new Date() } }
         );
         
-        await ctx.reply('✅ Start image updated!');
+        await ctx.reply('✅ Start image URL updated!');
         await ctx.scene.leave();
         await showAdminPanel(ctx);
     } catch (error) {
@@ -922,8 +1286,20 @@ scenes.editStartImage.on('text', async (ctx) => {
     }
 });
 
+bot.action('admin_upload_startimage', async (ctx) => {
+    await ctx.reply('Send the image you want to upload:\n\nType "cancel" to cancel.');
+    await ctx.scene.enter('edit_start_image_scene');
+});
+
 scenes.editStartImage.on('photo', async (ctx) => {
     try {
+        if (ctx.message.text?.toLowerCase() === 'cancel') {
+            await ctx.reply('❌ Upload cancelled.');
+            await ctx.scene.leave();
+            await showAdminPanel(ctx);
+            return;
+        }
+        
         const photo = ctx.message.photo[ctx.message.photo.length - 1];
         const fileLink = await ctx.telegram.getFileLink(photo.file_id);
         const response = await fetch(fileLink);
@@ -932,12 +1308,15 @@ scenes.editStartImage.on('photo', async (ctx) => {
         
         const buffer = await response.buffer();
         
-        // Upload to Cloudinary without name overlay
+        // Upload to Cloudinary with {name} variable
         const result = await uploadToCloudinary(buffer, 'start_images');
+        
+        // Create URL with {name} variable
+        const cloudinaryUrl = result.secure_url.replace('/upload/', '/upload/l_text:Stalinist%20One_140_bold:{name},co_rgb:00e5ff,g_center/');
         
         await db.collection('admin').updateOne(
             { type: 'config' },
-            { $set: { startImage: result.secure_url, updatedAt: new Date() } }
+            { $set: { startImage: cloudinaryUrl, updatedAt: new Date() } }
         );
         
         await ctx.reply('✅ Image uploaded and set as start image!');
@@ -948,11 +1327,6 @@ scenes.editStartImage.on('photo', async (ctx) => {
         await ctx.reply('❌ Failed to upload image.');
         await ctx.scene.leave();
     }
-});
-
-bot.action('admin_upload_startimage', async (ctx) => {
-    await ctx.reply('Send the image you want to upload:\n\nType "cancel" to cancel.');
-    await ctx.scene.enter('edit_start_image_scene');
 });
 
 bot.action('admin_reset_startimage', async (ctx) => {
@@ -971,7 +1345,7 @@ bot.action('admin_reset_startimage', async (ctx) => {
 });
 
 // ==========================================
-// ADMIN FEATURES - START MESSAGE
+// ADMIN FEATURES - START MESSAGE (FIXED)
 // ==========================================
 
 bot.action('admin_startmessage', async (ctx) => {
@@ -981,10 +1355,10 @@ bot.action('admin_startmessage', async (ctx) => {
         const config = await db.collection('admin').findOne({ type: 'config' });
         const currentMessage = config?.startMessage || DEFAULT_CONFIG.startMessage;
         
-        const text = `📝 *Start Message Management*\n\nCurrent Message:\n\`\`\`\n${currentMessage}\n\`\`\`\n\nSelect an option:`;
+        const text = `📝 *Start Message Management*\n\nCurrent Message:\n\`\`\`\n${currentMessage}\n\`\`\`\n\n*Available variables: {first_name}, {last_name}, {full_name}, {username}, {name}*\n\nSelect an option:`;
         
         const keyboard = [
-            [{ text: '✏️ Edit Message', callback_data: 'admin_edit_startmessage' }, { text: '🔄 Reset to Default', callback_data: 'admin_reset_startmessage' }],
+            [{ text: '✏️ Edit', callback_data: 'admin_edit_startmessage' }, { text: '🔄 Reset', callback_data: 'admin_reset_startmessage' }],
             [{ text: '🔙 Back', callback_data: 'admin_back' }]
         ];
         
@@ -1043,10 +1417,9 @@ bot.action('admin_reset_startmessage', async (ctx) => {
 });
 
 // ==========================================
-// ADMIN FEATURES - MENU IMAGE & MESSAGE
+// ADMIN FEATURES - MENU IMAGE (FIXED)
 // ==========================================
 
-// Menu Image (similar to start image)
 bot.action('admin_menuimage', async (ctx) => {
     if (!await isAdmin(ctx.from.id)) return;
     
@@ -1054,11 +1427,11 @@ bot.action('admin_menuimage', async (ctx) => {
         const config = await db.collection('admin').findOne({ type: 'config' });
         const currentImage = config?.menuImage || DEFAULT_CONFIG.menuImage;
         
-        const text = `🖼️ *Menu Image Management*\n\nCurrent Image:\n\`${currentImage}\`\n\nSelect an option:`;
+        const text = `🖼️ *Menu Image Management*\n\nCurrent Image:\n\`${currentImage}\`\n\n*Supports {name} variable*\n\nSelect an option:`;
         
         const keyboard = [
-            [{ text: '✏️ Edit Image URL', callback_data: 'admin_edit_menuimage' }, { text: '📤 Upload Image', callback_data: 'admin_upload_menuimage' }],
-            [{ text: '🔄 Reset to Default', callback_data: 'admin_reset_menuimage' }, { text: '🔙 Back', callback_data: 'admin_back' }]
+            [{ text: '✏️ Edit URL', callback_data: 'admin_edit_menuimage_url' }, { text: '📤 Upload', callback_data: 'admin_upload_menuimage' }],
+            [{ text: '🔄 Reset', callback_data: 'admin_reset_menuimage' }, { text: '🔙 Back', callback_data: 'admin_back' }]
         ];
         
         await ctx.editMessageText(text, {
@@ -1071,7 +1444,104 @@ bot.action('admin_menuimage', async (ctx) => {
     }
 });
 
-// Menu Message (similar to start message)
+bot.action('admin_edit_menuimage_url', async (ctx) => {
+    await ctx.reply('Enter the new image URL (supports {name} variable):\n\nType "cancel" to cancel.');
+    await ctx.scene.enter('edit_menu_image_scene');
+});
+
+scenes.editMenuImage.on('text', async (ctx) => {
+    try {
+        if (ctx.message.text.toLowerCase() === 'cancel') {
+            await ctx.reply('❌ Edit cancelled.');
+            await ctx.scene.leave();
+            await showAdminPanel(ctx);
+            return;
+        }
+        
+        const newUrl = ctx.message.text.trim();
+        
+        if (!newUrl.startsWith('http')) {
+            await ctx.reply('❌ Invalid URL. Must start with http:// or https://');
+            return;
+        }
+        
+        await db.collection('admin').updateOne(
+            { type: 'config' },
+            { $set: { menuImage: newUrl, updatedAt: new Date() } }
+        );
+        
+        await ctx.reply('✅ Menu image URL updated!');
+        await ctx.scene.leave();
+        await showAdminPanel(ctx);
+    } catch (error) {
+        console.error('Edit menu image error:', error);
+        await ctx.reply('❌ Failed to update image.');
+        await ctx.scene.leave();
+    }
+});
+
+bot.action('admin_upload_menuimage', async (ctx) => {
+    await ctx.reply('Send the image you want to upload:\n\nType "cancel" to cancel.');
+    await ctx.scene.enter('edit_menu_image_scene');
+});
+
+scenes.editMenuImage.on('photo', async (ctx) => {
+    try {
+        if (ctx.message.text?.toLowerCase() === 'cancel') {
+            await ctx.reply('❌ Upload cancelled.');
+            await ctx.scene.leave();
+            await showAdminPanel(ctx);
+            return;
+        }
+        
+        const photo = ctx.message.photo[ctx.message.photo.length - 1];
+        const fileLink = await ctx.telegram.getFileLink(photo.file_id);
+        const response = await fetch(fileLink);
+        
+        if (!response.ok) throw new Error('Failed to fetch image');
+        
+        const buffer = await response.buffer();
+        
+        // Upload to Cloudinary with {name} variable
+        const result = await uploadToCloudinary(buffer, 'menu_images');
+        
+        // Create URL with {name} variable
+        const cloudinaryUrl = result.secure_url.replace('/upload/', '/upload/l_text:Stalinist%20One_140_bold:{name},co_rgb:00e5ff,g_center/');
+        
+        await db.collection('admin').updateOne(
+            { type: 'config' },
+            { $set: { menuImage: cloudinaryUrl, updatedAt: new Date() } }
+        );
+        
+        await ctx.reply('✅ Image uploaded and set as menu image!');
+        await ctx.scene.leave();
+        await showAdminPanel(ctx);
+    } catch (error) {
+        console.error('Upload menu image error:', error);
+        await ctx.reply('❌ Failed to upload image.');
+        await ctx.scene.leave();
+    }
+});
+
+bot.action('admin_reset_menuimage', async (ctx) => {
+    try {
+        await db.collection('admin').updateOne(
+            { type: 'config' },
+            { $set: { menuImage: DEFAULT_CONFIG.menuImage, updatedAt: new Date() } }
+        );
+        
+        await ctx.answerCbQuery('✅ Menu image reset to default');
+        await showAdminPanel(ctx);
+    } catch (error) {
+        console.error('Reset menu image error:', error);
+        await ctx.answerCbQuery('❌ Failed to reset image');
+    }
+});
+
+// ==========================================
+// ADMIN FEATURES - MENU MESSAGE (FIXED)
+// ==========================================
+
 bot.action('admin_menumessage', async (ctx) => {
     if (!await isAdmin(ctx.from.id)) return;
     
@@ -1079,10 +1549,10 @@ bot.action('admin_menumessage', async (ctx) => {
         const config = await db.collection('admin').findOne({ type: 'config' });
         const currentMessage = config?.menuMessage || DEFAULT_CONFIG.menuMessage;
         
-        const text = `📝 *Menu Message Management*\n\nCurrent Message:\n\`\`\`\n${currentMessage}\n\`\`\`\n\nSelect an option:`;
+        const text = `📝 *Menu Message Management*\n\nCurrent Message:\n\`\`\`\n${currentMessage}\n\`\`\`\n\n*Available variables: {first_name}, {last_name}, {full_name}, {username}, {name}*\n\nSelect an option:`;
         
         const keyboard = [
-            [{ text: '✏️ Edit Message', callback_data: 'admin_edit_menumessage' }, { text: '🔄 Reset to Default', callback_data: 'admin_reset_menumessage' }],
+            [{ text: '✏️ Edit', callback_data: 'admin_edit_menumessage' }, { text: '🔄 Reset', callback_data: 'admin_reset_menumessage' }],
             [{ text: '🔙 Back', callback_data: 'admin_back' }]
         ];
         
@@ -1096,8 +1566,52 @@ bot.action('admin_menumessage', async (ctx) => {
     }
 });
 
+bot.action('admin_edit_menumessage', async (ctx) => {
+    await ctx.reply('Enter the new menu message:\n\nType "cancel" to cancel.');
+    await ctx.scene.enter('edit_menu_message_scene');
+});
+
+scenes.editMenuMessage.on('text', async (ctx) => {
+    try {
+        if (ctx.message.text.toLowerCase() === 'cancel') {
+            await ctx.reply('❌ Edit cancelled.');
+            await ctx.scene.leave();
+            await showAdminPanel(ctx);
+            return;
+        }
+        
+        await db.collection('admin').updateOne(
+            { type: 'config' },
+            { $set: { menuMessage: ctx.message.text, updatedAt: new Date() } }
+        );
+        
+        await ctx.reply('✅ Menu message updated!');
+        await ctx.scene.leave();
+        await showAdminPanel(ctx);
+    } catch (error) {
+        console.error('Edit menu message error:', error);
+        await ctx.reply('❌ Failed to update message.');
+        await ctx.scene.leave();
+    }
+});
+
+bot.action('admin_reset_menumessage', async (ctx) => {
+    try {
+        await db.collection('admin').updateOne(
+            { type: 'config' },
+            { $set: { menuMessage: DEFAULT_CONFIG.menuMessage, updatedAt: new Date() } }
+        );
+        
+        await ctx.answerCbQuery('✅ Menu message reset to default');
+        await showAdminPanel(ctx);
+    } catch (error) {
+        console.error('Reset menu message error:', error);
+        await ctx.answerCbQuery('❌ Failed to reset message');
+    }
+});
+
 // ==========================================
-// ADMIN FEATURES - CODE TIMER
+// ADMIN FEATURES - CODE TIMER (FIXED)
 // ==========================================
 
 bot.action('admin_timer', async (ctx) => {
@@ -1199,7 +1713,7 @@ bot.action('admin_channels', async (ctx) => {
             text += 'No channels added yet.\n';
         } else {
             channels.forEach((channel, index) => {
-                text += `${index + 1}. ${channel.buttonLabel || channel.title}\n`;
+                text += `${index + 1}. ${channel.buttonLabel || channel.title} (${channel.type || 'public'})\n`;
             });
         }
         
@@ -1221,7 +1735,7 @@ bot.action('admin_channels', async (ctx) => {
     }
 });
 
-// Add Channel - FIXED
+// Add Channel - NEW FLOW: Name → Link → ID
 bot.action('admin_add_channel', async (ctx) => {
     if (!await isAdmin(ctx.from.id)) return;
     
@@ -1243,11 +1757,48 @@ scenes.addChannelName.on('text', async (ctx) => {
             buttonLabel: ctx.message.text
         };
         
-        await ctx.reply('Now send the channel ID (e.g., -1001234567890) or username (e.g., @channelname):\n\nYou can also forward a message from the channel.');
+        await ctx.reply('Now send the channel link (e.g., https://t.me/channelname or https://t.me/joinchat/xxxxxx):\n\nType "cancel" to cancel.');
+        await ctx.scene.leave();
+        await ctx.scene.enter('add_channel_link_scene');
+    } catch (error) {
+        console.error('Add channel name error:', error);
+        await ctx.reply('❌ An error occurred.');
+        await ctx.scene.leave();
+    }
+});
+
+scenes.addChannelLink.on('text', async (ctx) => {
+    try {
+        if (ctx.message.text.toLowerCase() === 'cancel') {
+            await ctx.reply('❌ Add cancelled.');
+            delete ctx.session.channelData;
+            await ctx.scene.leave();
+            await showAdminPanel(ctx);
+            return;
+        }
+        
+        if (!ctx.session.channelData) {
+            await ctx.reply('❌ Session expired. Please start again.');
+            await ctx.scene.leave();
+            await showAdminPanel(ctx);
+            return;
+        }
+        
+        const link = ctx.message.text.trim();
+        
+        // Validate link
+        if (!link.startsWith('https://t.me/')) {
+            await ctx.reply('❌ Invalid Telegram link. Must start with https://t.me/');
+            return;
+        }
+        
+        ctx.session.channelData.link = link;
+        
+        await ctx.reply('Now send the channel ID:\n\nFor public channels: @username\nFor private channels: -1001234567890\n\nYou can also forward a message from the channel.\n\nType "cancel" to cancel.');
         await ctx.scene.leave();
         await ctx.scene.enter('add_channel_id_scene');
     } catch (error) {
-        console.error('Add channel name error:', error);
+        console.error('Add channel link error:', error);
         await ctx.reply('❌ An error occurred.');
         await ctx.scene.leave();
     }
@@ -1263,6 +1814,7 @@ scenes.addChannelId.on(['text', 'forward_date'], async (ctx) => {
         }
         
         const buttonLabel = ctx.session.channelData.buttonLabel;
+        const link = ctx.session.channelData.link;
         let channelIdentifier;
         
         if (ctx.message.forward_from_chat) {
@@ -1274,41 +1826,82 @@ scenes.addChannelId.on(['text', 'forward_date'], async (ctx) => {
             return;
         }
         
+        // Determine channel type
+        const isPublic = channelIdentifier.startsWith('@') || !channelIdentifier.startsWith('-100');
+        
         // Try to get chat info
         let chat;
         try {
             chat = await ctx.telegram.getChat(channelIdentifier);
         } catch (error) {
-            await ctx.reply(`❌ Error: ${error.message}\n\nPlease make sure the bot is added to the channel and is admin.`);
-            return;
+            // If private channel and bot is not member, we can still add it
+            if (!isPublic) {
+                // For private channels, we might not be able to get chat info
+                // Extract numeric ID from identifier
+                let numericId;
+                if (channelIdentifier.startsWith('-100')) {
+                    numericId = channelIdentifier;
+                } else if (channelIdentifier.startsWith('@')) {
+                    // Try to resolve username
+                    try {
+                        chat = await ctx.telegram.getChat(channelIdentifier);
+                        numericId = chat.id;
+                    } catch (err) {
+                        await ctx.reply('❌ Cannot access channel. Make sure bot is added to the channel.');
+                        delete ctx.session.channelData;
+                        await ctx.scene.leave();
+                        await showAdminPanel(ctx);
+                        return;
+                    }
+                } else {
+                    // Try to parse as numeric ID
+                    numericId = `-100${channelIdentifier}`;
+                }
+                
+                // Create channel object without checking admin status
+                const newChannel = {
+                    id: numericId,
+                    title: `Private Channel ${numericId}`,
+                    buttonLabel: buttonLabel,
+                    link: link,
+                    type: 'private',
+                    addedAt: new Date()
+                };
+                
+                // Add to database
+                await db.collection('admin').updateOne(
+                    { type: 'config' },
+                    { $push: { channels: newChannel } }
+                );
+                
+                await ctx.reply(`✅ Private channel added successfully!\n\n• Name: ${buttonLabel}\n• ID: ${numericId}\n• Link: ${link}\n\nNote: Users will need to join via link.`);
+                
+                delete ctx.session.channelData;
+                await ctx.scene.leave();
+                await showAdminPanel(ctx);
+                return;
+            } else {
+                await ctx.reply(`❌ Error: ${error.message}\n\nPlease make sure the bot is added to the channel.`);
+                delete ctx.session.channelData;
+                await ctx.scene.leave();
+                await showAdminPanel(ctx);
+                return;
+            }
         }
         
-        // Check if bot is admin
+        // For accessible channels, check if bot is admin
         try {
             const member = await ctx.telegram.getChatMember(chat.id, ctx.botInfo.id);
             if (member.status !== 'administrator') {
                 await ctx.reply('❌ Bot must be admin in the channel.\nMake bot admin and try again.');
+                delete ctx.session.channelData;
                 await ctx.scene.leave();
                 await showAdminPanel(ctx);
                 return;
             }
         } catch (error) {
-            await ctx.reply('❌ Bot must be admin in the channel.\nMake bot admin and try again.');
-            await ctx.scene.leave();
-            await showAdminPanel(ctx);
-            return;
-        }
-        
-        // Get invite link
-        let link;
-        try {
-            if (chat.username) {
-                link = `https://t.me/${chat.username}`;
-            } else {
-                link = await ctx.telegram.exportChatInviteLink(chat.id);
-            }
-        } catch (error) {
-            link = `https://t.me/c/${String(chat.id).slice(4)}`;
+            // If we can't check admin status, still allow adding
+            console.warn('Cannot check admin status:', error.message);
         }
         
         // Create channel object
@@ -1318,6 +1911,7 @@ scenes.addChannelId.on(['text', 'forward_date'], async (ctx) => {
             buttonLabel: buttonLabel,
             link: link,
             type: chat.username ? 'public' : 'private',
+            username: chat.username,
             addedAt: new Date()
         };
         
@@ -1327,7 +1921,7 @@ scenes.addChannelId.on(['text', 'forward_date'], async (ctx) => {
             { $push: { channels: newChannel } }
         );
         
-        await ctx.reply(`✅ Channel added successfully!\n\n• Name: ${buttonLabel}\n• ID: ${chat.id}\n• Link: ${link}`);
+        await ctx.reply(`✅ Channel added successfully!\n\n• Name: ${buttonLabel}\n• Title: ${chat.title}\n• ID: ${chat.id}\n• Link: ${link}\n• Type: ${chat.username ? 'public' : 'private'}`);
         
         // Clear session
         delete ctx.session.channelData;
@@ -1335,6 +1929,7 @@ scenes.addChannelId.on(['text', 'forward_date'], async (ctx) => {
     } catch (error) {
         console.error('Add channel error:', error);
         await ctx.reply(`❌ Error: ${error.message}\n\nPlease try again.`);
+        delete ctx.session.channelData;
     }
     
     await ctx.scene.leave();
@@ -1434,7 +2029,7 @@ bot.action('admin_apps', async (ctx) => {
     }
 });
 
-// Add App - FIXED
+// Add App
 bot.action('admin_add_app', async (ctx) => {
     if (!await isAdmin(ctx.from.id)) return;
     
@@ -1698,245 +2293,6 @@ bot.action(/^delete_app_(.+)$/, async (ctx) => {
 });
 
 // ==========================================
-// ADMIN FEATURES - CONTACT USER (NEW FEATURE)
-// ==========================================
-
-bot.action('admin_contact_user', async (ctx) => {
-    if (!await isAdmin(ctx.from.id)) return;
-    
-    await ctx.reply('Enter username or user ID to contact:\n\nType "cancel" to cancel.');
-    await ctx.scene.enter('contact_user_scene');
-});
-
-scenes.contactUser.on('text', async (ctx) => {
-    try {
-        if (ctx.message.text.toLowerCase() === 'cancel') {
-            await ctx.reply('❌ Contact cancelled.');
-            await ctx.scene.leave();
-            await showAdminPanel(ctx);
-            return;
-        }
-        
-        // Store user identifier in session
-        ctx.session.contactUser = {
-            identifier: ctx.message.text.trim()
-        };
-        
-        await ctx.reply('Now send the message you want to send (text, photo, or document):\n\nType "cancel" to cancel.');
-        await ctx.scene.leave();
-        await ctx.scene.enter('contact_user_message_scene');
-    } catch (error) {
-        console.error('Contact user error:', error);
-        await ctx.reply('❌ An error occurred.');
-        await ctx.scene.leave();
-    }
-});
-
-scenes.contactUserMessage.on(['text', 'photo', 'document'], async (ctx) => {
-    try {
-        if (!ctx.session.contactUser) {
-            await ctx.reply('❌ Session expired. Please start again.');
-            await ctx.scene.leave();
-            await showAdminPanel(ctx);
-            return;
-        }
-        
-        const identifier = ctx.session.contactUser.identifier;
-        let userId;
-        
-        // Try to resolve identifier
-        if (identifier.startsWith('@')) {
-            // Username
-            try {
-                const user = await ctx.telegram.getChat(identifier);
-                userId = user.id;
-            } catch (error) {
-                await ctx.reply('❌ Cannot find user with that username.');
-                delete ctx.session.contactUser;
-                await ctx.scene.leave();
-                await showAdminPanel(ctx);
-                return;
-            }
-        } else {
-            // User ID
-            userId = parseInt(identifier);
-            if (isNaN(userId)) {
-                await ctx.reply('❌ Invalid user ID. Please enter a numeric ID or username starting with @.');
-                delete ctx.session.contactUser;
-                await ctx.scene.leave();
-                await showAdminPanel(ctx);
-                return;
-            }
-        }
-        
-        // Try to send message
-        try {
-            if (ctx.message.photo) {
-                await ctx.telegram.sendPhoto(
-                    userId,
-                    ctx.message.photo[ctx.message.photo.length - 1].file_id,
-                    {
-                        caption: ctx.message.caption || '',
-                        reply_markup: {
-                            inline_keyboard: [[
-                                { text: '📩 Reply to Admin', callback_data: `reply_to_admin_${ctx.from.id}` }
-                            ]]
-                        }
-                    }
-                );
-            } else if (ctx.message.document) {
-                await ctx.telegram.sendDocument(
-                    userId,
-                    ctx.message.document.file_id,
-                    {
-                        caption: ctx.message.caption || '',
-                        reply_markup: {
-                            inline_keyboard: [[
-                                { text: '📩 Reply to Admin', callback_data: `reply_to_admin_${ctx.from.id}` }
-                            ]]
-                        }
-                    }
-                );
-            } else if (ctx.message.text) {
-                await ctx.telegram.sendMessage(
-                    userId,
-                    ctx.message.text,
-                    {
-                        reply_markup: {
-                            inline_keyboard: [[
-                                { text: '📩 Reply to Admin', callback_data: `reply_to_admin_${ctx.from.id}` }
-                            ]]
-                        }
-                    }
-                );
-            }
-            
-            await ctx.reply(`✅ Message sent to user ${identifier}`);
-            
-        } catch (error) {
-            await ctx.reply(`❌ Failed to send message: ${error.message}`);
-        }
-        
-        // Clear session
-        delete ctx.session.contactUser;
-        
-    } catch (error) {
-        console.error('Contact user message error:', error);
-        await ctx.reply('❌ An error occurred.');
-    }
-    
-    await ctx.scene.leave();
-    await showAdminPanel(ctx);
-});
-
-// Handle reply to admin
-bot.action(/^reply_to_admin_(.+)$/, async (ctx) => {
-    try {
-        const adminId = ctx.match[1];
-        
-        // Store admin ID in session
-        ctx.session.replyToAdmin = {
-            adminId: adminId
-        };
-        
-        await ctx.reply('Type your reply to the admin:\n\nType "cancel" to cancel.');
-        await ctx.scene.enter('reply_to_user_scene');
-    } catch (error) {
-        console.error('Reply to admin error:', error);
-        await ctx.answerCbQuery('❌ Error');
-    }
-});
-
-scenes.replyToUser.on(['text', 'photo', 'document'], async (ctx) => {
-    try {
-        if (!ctx.session.replyToAdmin) {
-            await ctx.reply('❌ Session expired.');
-            await ctx.scene.leave();
-            return;
-        }
-        
-        const adminId = ctx.session.replyToAdmin.adminId;
-        const fromUser = ctx.from;
-        const userInfo = `From: ${fromUser.first_name || ''} ${fromUser.last_name || ''} (@${fromUser.username || 'no_username'}) ID: ${fromUser.id}`;
-        
-        // Send to admin
-        try {
-            if (ctx.message.photo) {
-                await ctx.telegram.sendPhoto(
-                    adminId,
-                    ctx.message.photo[ctx.message.photo.length - 1].file_id,
-                    {
-                        caption: `${userInfo}\n\n${ctx.message.caption || ''}`,
-                        reply_markup: {
-                            inline_keyboard: [[
-                                { text: '💬 Reply Back', callback_data: `contact_user_${fromUser.id}` }
-                            ]]
-                        }
-                    }
-                );
-            } else if (ctx.message.document) {
-                await ctx.telegram.sendDocument(
-                    adminId,
-                    ctx.message.document.file_id,
-                    {
-                        caption: `${userInfo}\n\n${ctx.message.caption || ''}`,
-                        reply_markup: {
-                            inline_keyboard: [[
-                                { text: '💬 Reply Back', callback_data: `contact_user_${fromUser.id}` }
-                            ]]
-                        }
-                    }
-                );
-            } else if (ctx.message.text) {
-                await ctx.telegram.sendMessage(
-                    adminId,
-                    `${userInfo}\n\n${ctx.message.text}`,
-                    {
-                        reply_markup: {
-                            inline_keyboard: [[
-                                { text: '💬 Reply Back', callback_data: `contact_user_${fromUser.id}` }
-                            ]]
-                        }
-                    }
-                );
-            }
-            
-            await ctx.reply('✅ Your reply has been sent to the admin.');
-            
-        } catch (error) {
-            await ctx.reply('❌ Failed to send reply.');
-        }
-        
-        // Clear session
-        delete ctx.session.replyToAdmin;
-        
-    } catch (error) {
-        console.error('Reply to user error:', error);
-        await ctx.reply('❌ An error occurred.');
-    }
-    
-    await ctx.scene.leave();
-});
-
-// Handle contact user from button
-bot.action(/^contact_user_(.+)$/, async (ctx) => {
-    try {
-        const userId = ctx.match[1];
-        
-        // Store user ID in session
-        ctx.session.contactUser = {
-            identifier: userId
-        };
-        
-        await ctx.reply(`Now send the message to user ID: ${userId}\n\nType "cancel" to cancel.`);
-        await ctx.scene.enter('contact_user_message_scene');
-    } catch (error) {
-        console.error('Contact user from button error:', error);
-        await ctx.answerCbQuery('❌ Error');
-    }
-});
-
-// ==========================================
 // ADMIN FEATURES - MANAGE ADMINS
 // ==========================================
 
@@ -2018,7 +2374,7 @@ scenes.addAdmin.on('text', async (ctx) => {
     await showAdminPanel(ctx);
 });
 
-// Remove Admin (simplified)
+// Remove Admin
 bot.action('admin_remove_admin', async (ctx) => {
     try {
         const config = await db.collection('admin').findOne({ type: 'config' });
@@ -2230,7 +2586,7 @@ bot.action('confirm_delete_apps', async (ctx) => {
     }
 });
 
-// Delete Everything (FIXED)
+// Delete Everything
 bot.action('delete_everything', async (ctx) => {
     const keyboard = [
         [{ text: '🔥 YES, DELETE EVERYTHING', callback_data: 'confirm_delete_everything' }],
@@ -2281,7 +2637,14 @@ bot.catch((error, ctx) => {
     console.error('Bot error:', error);
     try {
         if (ctx.message) {
-            ctx.reply('❌ An error occurred. Please try again.');
+            ctx.reply('❌ An error occurred. Please try again.\n\nClick "Report to Admin" below if issue persists.', {
+                reply_markup: {
+                    inline_keyboard: [[
+                        { text: '⚠️ Report to Admin', callback_data: 'report_to_admin' },
+                        { text: '🔙 Back to Start', callback_data: 'back_to_start' }
+                    ]]
+                }
+            });
         }
     } catch (e) {
         console.error('Error in error handler:', e);
