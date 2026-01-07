@@ -60,7 +60,7 @@ const scenes = {
 Object.values(scenes).forEach(scene => stage.register(scene));
 
 // 🔐 ADMIN CONFIGURATION
-const ADMIN_IDS = [8435248854];
+const ADMIN_IDS = [8435248854,7823816525];
 
 // ==========================================
 // DATABASE INITIALIZATION
@@ -269,6 +269,29 @@ bot.start(async (ctx) => {
     } catch (e) {
         console.error(e);
     }
+});
+
+// Add this right after the bot.start handler (around line 180-185)
+// ==========================================
+// DEBUG COMMAND
+// ==========================================
+
+bot.command('debug', async (ctx) => {
+    const userId = ctx.from.id;
+    const isAdminUser = await isAdmin(userId);
+    
+    const config = await db.collection('admin').findOne({ type: 'config' });
+    const dbAdmins = config?.admins || [];
+    
+    await ctx.reply(
+        `🔍 *Debug Information*\n\n` +
+        `👤 Your ID: \`${userId}\`\n` +
+        `👑 Is Admin: ${isAdminUser ? '✅ YES' : '❌ NO'}\n` +
+        `📋 Hardcoded Admins: ${ADMIN_IDS.join(', ')}\n` +
+        `🗃️ DB Admins: ${dbAdmins.join(', ')}\n` +
+        `✅ Admin Match: ${ADMIN_IDS.includes(Number(userId)) ? 'YES (Hardcoded)' : 'NO'}`,
+        { parse_mode: 'Markdown' }
+    );
 });
 
 async function showStartScreen(ctx) {
