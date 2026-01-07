@@ -7,7 +7,7 @@ const { MongoClient } = require('mongodb');
 require('dotenv').config();
 
 // Initialize bot with your token
-const token = "8157925136:AAGd6IQ7FVD90OwpGliTEfQVz47NTNLUpJs";
+const token = "8157925136:AAFPNIG6ipDPyAnwqc9cgIvBa2pcqVDfrW8";
 
 const bot = new Telegraf(token);
 
