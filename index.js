@@ -994,17 +994,7 @@ bot.action(/^app_(.+)$/, async (ctx) => {
         message = replaceVariables(message, userVars);
         message = replaceVariables(message, appVars);
         
-        // Format codes nicely
-        let formattedCodes = '';
-        codes.forEach((code, index) => {
-            formattedCodes += `• <code>${code}</code>\n`;
-        });
-        
-        // Add formatted codes to message
-        if (!message.includes('{code')) {
-            message += `\n\n${formattedCodes}`;
-        }
-        
+        // Format codes nicely:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
         // Send app image if available
         if (app.image && app.image !== 'none') {
             // Add name overlay to app image
