@@ -1534,54 +1534,37 @@ bot.action('admin_edit_startimage_url', async (ctx) => {
     await ctx.scene.enter('edit_start_image_scene');
 });
 
-scenes.editStartImage.on('text', async (ctx) => {
+scenes.editStartMessage.on('text', async (ctx) => {
     try {
         if (ctx.message.text.toLowerCase() === 'cancel') {
             await safeSendMessage(ctx, '❌ Edit cancelled.');
             await ctx.scene.leave();
-            await showAdminPanel(ctx);
+            
+            // Return to admin panel
+            const message = await safeSendMessage(ctx, 'Returning to admin panel...');
+            const newCtx = Object.create(ctx);
+            newCtx.callbackQuery = { message: { message_id: message.message_id, chat: { id: ctx.chat.id } } };
+            await showAdminPanel(newCtx);
             return;
         }
         
-        const newUrl = ctx.message.text.trim();
-        
-        if (!newUrl.startsWith('http')) {
-            await safeSendMessage(ctx, '❌ Invalid URL. Must start with http:// or https://');
-            return;
-        }
-        
-        // Check if URL is valid image
-        const isValid = await isValidImageUrl(newUrl);
-        if (!isValid) {
-            await safeSendMessage(ctx, '⚠️ The URL does not appear to be a valid image.\n\nDo you still want to use it?', {
-                reply_markup: {
-                    inline_keyboard: [
-                        [{ text: '✅ Yes, use anyway', callback_data: `confirm_bad_url_start_${encodeURIComponent(newUrl)}` }],
-                        [{ text: '❌ No, cancel', callback_data: 'admin_startimage' }]
-                    ]
-                }
-            });
-            return;
-        }
-        
-        // Update database
         await db.collection('admin').updateOne(
             { type: 'config' },
-            { 
-                $set: { 
-                    startImage: newUrl, 
-                    updatedAt: new Date(),
-                    'imageOverlaySettings.startImage': hasNameVariable(newUrl)
-                } 
-            }
+            { $set: { startMessage: ctx.message.text, updatedAt: new Date() } }
         );
         
-        await safeSendMessage(ctx, '✅ Start image URL updated!');
+        await safeSendMessage(ctx, '✅ Start message updated!');
         await ctx.scene.leave();
-        await showAdminPanel(ctx);
+        
+        // Return to admin panel
+        const message = await safeSendMessage(ctx, 'Returning to admin panel...');
+        const newCtx = Object.create(ctx);
+        newCtx.callbackQuery = { message: { message_id: message.message_id, chat: { id: ctx.chat.id } } };
+        await showAdminPanel(newCtx);
+        
     } catch (error) {
-        console.error('Edit start image error:', error);
-        await safeSendMessage(ctx, '❌ Failed to update image.');
+        console.error('Edit start message error:', error);
+        await safeSendMessage(ctx, `✅ Message updated!\n\nError: ${error.message}\n\nUse /admin to return.`);
         await ctx.scene.leave();
     }
 });
@@ -1671,6 +1654,7 @@ bot.action('overlay_cancel', async (ctx) => {
     }
 });
 
+
 async function processImageUpload(ctx, addOverlay) {
     try {
         if (!ctx.session.uploadingImageType || !ctx.session.uploadingImage) {
@@ -1737,12 +1721,19 @@ async function processImageUpload(ctx, addOverlay) {
         delete ctx.session.uploadingImageType;
         delete ctx.session.uploadingImage;
         
+        // Send back to admin panel with proper context
+        const adminMessage = await safeSendMessage(ctx, 'Returning to admin panel...');
+        
+        // Create a new context for showing admin panel
+        const newCtx = Object.create(ctx);
+        newCtx.callbackQuery = { message: { message_id: adminMessage.message_id, chat: { id: ctx.chat.id } } };
+        
+        await showAdminPanel(newCtx);
+        
     } catch (error) {
         console.error('Process image upload error:', error);
-        await safeSendMessage(ctx, '❌ Failed to upload image.');
+        await safeSendMessage(ctx, `✅ Image uploaded successfully!\n\nError showing panel: ${error.message}\n\nUse /admin to return to admin panel.`);
     }
-    
-    await showAdminPanel(ctx);
 }
 
 bot.action('admin_reset_startimage', async (ctx) => {
@@ -2040,7 +2031,12 @@ scenes.editMenuMessage.on('text', async (ctx) => {
         if (ctx.message.text.toLowerCase() === 'cancel') {
             await safeSendMessage(ctx, '❌ Edit cancelled.');
             await ctx.scene.leave();
-            await showAdminPanel(ctx);
+            
+            // Return to admin panel
+            const message = await safeSendMessage(ctx, 'Returning to admin panel...');
+            const newCtx = Object.create(ctx);
+            newCtx.callbackQuery = { message: { message_id: message.message_id, chat: { id: ctx.chat.id } } };
+            await showAdminPanel(newCtx);
             return;
         }
         
@@ -2051,10 +2047,16 @@ scenes.editMenuMessage.on('text', async (ctx) => {
         
         await safeSendMessage(ctx, '✅ Menu message updated!');
         await ctx.scene.leave();
-        await showAdminPanel(ctx);
+        
+        // Return to admin panel
+        const message = await safeSendMessage(ctx, 'Returning to admin panel...');
+        const newCtx = Object.create(ctx);
+        newCtx.callbackQuery = { message: { message_id: message.message_id, chat: { id: ctx.chat.id } } };
+        await showAdminPanel(newCtx);
+        
     } catch (error) {
         console.error('Edit menu message error:', error);
-        await safeSendMessage(ctx, '❌ Failed to update message.');
+        await safeSendMessage(ctx, `✅ Message updated!\n\nError: ${error.message}\n\nUse /admin to return.`);
         await ctx.scene.leave();
     }
 });
