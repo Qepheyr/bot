@@ -2,6 +2,7 @@
 // TELEGRAM BOT - COMPLETE FIXED SOLUTION
 // ==========================================
 // Fixed: All bugs, proper flow, pagination, contact system
+// Added: Name overlay option for images
 // ==========================================
 
 const { Telegraf, Scenes, session, Markup } = require('telegraf');
@@ -86,7 +87,10 @@ const scenes = {
     addAdmin: createScene('add_admin_scene'),
     
     // Manage images scene
-    manageImages: createScene('manage_images_scene')
+    manageImages: createScene('manage_images_scene'),
+    
+    // Image overlay scene
+    imageOverlay: createScene('image_overlay_scene')
 };
 
 // Register all scenes
@@ -126,6 +130,11 @@ async function initBot() {
                 channels: [],
                 apps: [],
                 uploadedImages: [],
+                imageOverlaySettings: {
+                    startImage: true,
+                    menuImage: true,
+                    appImages: true
+                },
                 createdAt: new Date(),
                 updatedAt: new Date()
             });
@@ -174,17 +183,6 @@ function escapeMarkdown(text) {
         .replace(/\!/g, '\\!');
 }
 
-// Escape for HTML display (only for showing in code blocks)
-function escapeForDisplay(text) {
-    if (!text) return '';
-    return text.toString()
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#039;');
-}
-
 // Safe send message with HTML parse mode
 async function safeSendMessage(ctx, text, options = {}) {
     try {
@@ -210,19 +208,6 @@ async function safeEditMessage(ctx, text, options = {}) {
         console.error('Error editing message:', error.message);
         // Try without HTML parsing
         return await ctx.editMessageText(text, options);
-    }
-}
-
-// Safe reply with photo
-async function safeReplyWithPhoto(ctx, photo, options = {}) {
-    try {
-        return await ctx.replyWithPhoto(photo, { 
-            parse_mode: 'HTML',
-            ...options 
-        });
-    } catch (error) {
-        console.error('Error sending photo:', error.message);
-        return await ctx.reply('❌ Failed to send image. Please try again.');
     }
 }
 
@@ -392,26 +377,15 @@ function getUserVariables(user) {
     }
 }
 
-// Upload to Cloudinary - FIXED: Option to add name overlay
-async function uploadToCloudinary(fileBuffer, folder = 'bot_images', addNameOverlay = false) {
+// Upload to Cloudinary
+async function uploadToCloudinary(fileBuffer, folder = 'bot_images') {
     try {
         return new Promise((resolve, reject) => {
-            const uploadOptions = { 
-                folder: folder,
-                resource_type: 'auto'
-            };
-            
-            if (addNameOverlay) {
-                // If name overlay is requested, we'll add transformation after upload
-                uploadOptions.transformation = [
-                    { overlay: { font_family: 'Arial', font_size: 140, text: '{name}', font_weight: 'bold' } },
-                    { color: '#00e5ff' },
-                    { flags: 'layer_apply', gravity: 'center' }
-                ];
-            }
-            
             const uploadStream = cloudinary.uploader.upload_stream(
-                uploadOptions,
+                { 
+                    folder: folder,
+                    resource_type: 'auto'
+                },
                 (error, result) => {
                     if (error) {
                         console.error('Cloudinary upload error:', error);
@@ -435,21 +409,58 @@ async function uploadToCloudinary(fileBuffer, folder = 'bot_images', addNameOver
     }
 }
 
-// Get Cloudinary URL with name - FIXED: Only add name overlay if URL contains {name}
-function getCloudinaryUrlWithName(originalUrl, name) {
+// Get Cloudinary URL with name - FIXED: Check overlay settings
+async function getCloudinaryUrlWithName(originalUrl, name, imageType = 'startImage') {
     try {
         if (!originalUrl.includes('cloudinary.com')) return originalUrl;
         
-        // Check if URL already has {name} variable
-        if (originalUrl.includes('{name}')) {
-            // Clean name for image display
-            const cleanName = cleanNameForImage(name);
-            const encodedName = encodeURIComponent(cleanName);
-            return originalUrl.replace('{name}', encodedName);
+        // Get overlay settings
+        const config = await db.collection('admin').findOne({ type: 'config' });
+        const overlaySettings = config?.imageOverlaySettings || {
+            startImage: true,
+            menuImage: true,
+            appImages: true
+        };
+        
+        // Check if overlay should be applied
+        let shouldAddOverlay = false;
+        if (imageType === 'startImage') {
+            shouldAddOverlay = overlaySettings.startImage;
+        } else if (imageType === 'menuImage') {
+            shouldAddOverlay = overlaySettings.menuImage;
+        } else if (imageType === 'appImage') {
+            shouldAddOverlay = overlaySettings.appImages;
+        }
+        
+        if (!shouldAddOverlay) {
+            // Remove any existing {name} overlay from URL
+            const cleanUrl = originalUrl.replace(/l_text:[^\/]+\/[^\/]+\//, '');
+            return cleanUrl;
+        }
+        
+        // Always add name overlay for cloudinary URLs
+        const cleanName = cleanNameForImage(name);
+        const encodedName = encodeURIComponent(cleanName);
+        
+        // Check if URL already has transformations
+        if (originalUrl.includes('/upload/')) {
+            const parts = originalUrl.split('/upload/');
+            if (parts.length === 2) {
+                // Check if already has overlay
+                if (originalUrl.includes('l_text:')) {
+                    // Replace existing overlay
+                    const urlWithoutOverlay = originalUrl.replace(/\/l_text:[^\/]+\/[^\/]+\//, '/');
+                    return `${urlWithoutOverlay.split('/upload/')[0]}/upload/l_text:Stalinist%20One_140_bold:{name},co_rgb:00e5ff,g_center/${urlWithoutOverlay.split('/upload/')[1]}`;
+                } else {
+                    // Insert name overlay transformation
+                    return `${parts[0]}/upload/l_text:Stalinist%20One_140_bold:{name},co_rgb:00e5ff,g_center/${parts[1]}`;
+                }
+            }
         }
         
         return originalUrl;
     } catch (error) {
+        console.error('Error in getCloudinaryUrlWithName:', error);
         return originalUrl;
     }
 }
@@ -495,6 +506,21 @@ async function getPaginatedUsers(page = 1, limit = 40) {
         console.error('Error getting paginated users:', error);
         return { users: [], page: 1, totalPages: 0, totalUsers: 0, hasNext: false, hasPrev: false };
     }
+}
+
+// Format message for display (remove escaping)
+function formatMessageForDisplay(text) {
+    if (!text) return '';
+    // Remove extra escaping for display
+    return text.replace(/\\_/g, '_')
+               .replace(/\\\*/g, '*')
+               .replace(/\\\[/g, '[')
+               .replace(/\\\]/g, ']')
+               .replace(/\\\(/g, '(')
+               .replace(/\\\)/g, ')')
+               .replace(/\\\./g, '.')
+               .replace(/\\\!/g, '!')
+               .replace(/\\\-/g, '-');
 }
 
 // ==========================================
@@ -570,7 +596,7 @@ async function showStartScreen(ctx) {
         
         // Prepare image URL with name
         let startImage = config?.startImage || DEFAULT_CONFIG.startImage;
-        startImage = getCloudinaryUrlWithName(startImage, userVars.name);
+        startImage = await getCloudinaryUrlWithName(startImage, userVars.name, 'startImage');
         
         // Prepare message
         let startMessage = config?.startMessage || DEFAULT_CONFIG.startMessage;
@@ -604,8 +630,9 @@ async function showStartScreen(ctx) {
         // Add contact admin button
         buttons.push([{ text: '📞 Contact Admin', callback_data: 'contact_admin' }]);
         
-        await safeReplyWithPhoto(ctx, startImage, {
+        await ctx.replyWithPhoto(startImage, {
             caption: startMessage,
+            parse_mode: 'HTML',
             reply_markup: { inline_keyboard: buttons }
         });
         
@@ -643,7 +670,7 @@ bot.action('contact_admin', async (ctx) => {
             errorReport += `<b>Command/Function:</b> ${error.command || error.function || 'Unknown'}\n`;
             errorReport += `<b>User:</b> ${userInfo}\n`;
             errorReport += `<b>User ID:</b> <code>${user.id}</code>\n`;
-            errorReport += `<b>Error:</b> <code>${escapeForDisplay(error.error)}</code>\n`;
+            errorReport += `<b>Error:</b> <code>${escapeMarkdown(error.error)}</code>\n`;
             
             // Clear stored error
             delete ctx.session.lastError;
@@ -654,6 +681,8 @@ bot.action('contact_admin', async (ctx) => {
             errorReport += `<b>Message:</b> User clicked "Contact Admin" button`;
         }
         
+        await notifyAdmin(errorReport + `\n\n<pre>Click below to reply:</pre>`);
+        
         // Send reply button to all admins
         const config = await db.collection('admin').findOne({ type: 'config' });
         const allAdmins = config?.admins || ADMIN_IDS;
@@ -662,7 +691,7 @@ bot.action('contact_admin', async (ctx) => {
             try {
                 await bot.telegram.sendMessage(
                     adminId,
-                    errorReport + `\n\n<pre>Click below to reply:</pre>`,
+                    errorReport,
                     {
                         parse_mode: 'HTML',
                         reply_markup: {
@@ -750,7 +779,7 @@ async function showMainMenu(ctx) {
         
         // Prepare image URL with name
         let menuImage = config?.menuImage || DEFAULT_CONFIG.menuImage;
-        menuImage = getCloudinaryUrlWithName(menuImage, userVars.name);
+        menuImage = await getCloudinaryUrlWithName(menuImage, userVars.name, 'menuImage');
         
         // Prepare message
         let menuMessage = config?.menuMessage || DEFAULT_CONFIG.menuMessage;
@@ -787,8 +816,9 @@ async function showMainMenu(ctx) {
         // Add contact admin button
         keyboard.push([{ text: '📞 Contact Admin', callback_data: 'contact_admin' }]);
         
-        await safeReplyWithPhoto(ctx, menuImage, {
+        await ctx.replyWithPhoto(menuImage, {
             caption: menuMessage,
+            parse_mode: 'HTML',
             reply_markup: { inline_keyboard: keyboard }
         });
     } catch (error) {
@@ -861,7 +891,7 @@ bot.action(/^app_(.+)$/, async (ctx) => {
             const timeStr = formatTimeRemaining(remaining);
             
             await safeSendMessage(ctx, 
-                `⏰ <b>Please Wait</b>\n\nYou can generate new codes for <b>${escapeForDisplay(app.name)}</b> in:\n<code>${timeStr}</code>`
+                `⏰ <b>Please Wait</b>\n\nYou can generate new codes for <b>${escapeMarkdown(app.name)}</b> in:\n<code>${timeStr}</code>`
             );
             
             await safeSendMessage(ctx, '🔙 Back to Menu', {
@@ -917,12 +947,15 @@ bot.action(/^app_(.+)$/, async (ctx) => {
         
         // Send app image if available
         if (app.image && app.image !== 'none') {
-            // Add name overlay to app image if it contains {name}
+            // Add name overlay to app image
             let appImage = app.image;
-            appImage = getCloudinaryUrlWithName(appImage, userVars.name);
+            if (appImage.includes('cloudinary.com')) {
+                appImage = await getCloudinaryUrlWithName(appImage, userVars.name, 'appImage');
+            }
             
-            await safeReplyWithPhoto(ctx, appImage, {
+            await ctx.replyWithPhoto(appImage, {
                 caption: message,
+                parse_mode: 'HTML',
                 reply_markup: {
                     inline_keyboard: [[
                         { text: '🔙 Back to Menu', callback_data: 'back_to_menu' }
@@ -983,29 +1016,32 @@ bot.action('back_to_menu', async (ctx) => {
 // 🛡️ ADMIN PANEL - FIXED
 // ==========================================
 
-// Admin panel from button - FIXED: Use command trigger
+// Admin panel from button - FIXED: Use command instead of callback
 bot.action('admin_panel', async (ctx) => {
     try {
-        // Simulate /admin command
-        await ctx.answerCbQuery('Loading admin panel...');
-        // Use the command handler
+        if (!await isAdmin(ctx.from.id)) {
+            return ctx.answerCbQuery('❌ You are not authorized');
+        }
+        
+        // Use command method to trigger admin panel
         await ctx.deleteMessage().catch(() => {});
         await bot.handleUpdate({
+            update_id: Date.now(),
             message: {
+                message_id: Date.now(),
                 from: ctx.from,
                 chat: ctx.chat,
-                text: '/admin',
-                message_id: Date.now()
-            },
-            update_id: Date.now()
+                date: Math.floor(Date.now() / 1000),
+                text: '/admin'
+            }
         });
     } catch (error) {
-        console.error('Admin panel action error:', error);
+        console.error('Admin panel button error:', error);
         await ctx.answerCbQuery('❌ Error loading admin panel');
     }
 });
 
-// Admin command
+// Admin command - FIXED: Proper error handling
 bot.command('admin', async (ctx) => {
     try {
         if (!await isAdmin(ctx.from.id)) {
@@ -1028,7 +1064,8 @@ async function showAdminPanel(ctx) {
             [{ text: '🖼️ Menu Image', callback_data: 'admin_menuimage' }, { text: '📝 Menu Message', callback_data: 'admin_menumessage' }],
             [{ text: '⏰ Code Timer', callback_data: 'admin_timer' }, { text: '📺 Manage Channels', callback_data: 'admin_channels' }],
             [{ text: '📱 Manage Apps', callback_data: 'admin_apps' }, { text: '👑 Manage Admins', callback_data: 'admin_manage_admins' }],
-            [{ text: '🖼️ Manage Images', callback_data: 'admin_manage_images' }, { text: '🗑️ Delete Data', callback_data: 'admin_deletedata' }]
+            [{ text: '⚙️ Image Overlay Settings', callback_data: 'admin_image_overlay' }, { text: '🗑️ Delete Data', callback_data: 'admin_deletedata' }],
+            [{ text: '🖼️ Manage Images', callback_data: 'admin_manage_images' }]
         ];
         
         if (ctx.callbackQuery) {
@@ -1162,20 +1199,18 @@ async function showUserStatsPage(ctx, page) {
             
             // First user in row
             const user1 = users[i];
-            const status1 = user1.joinedAll ? '✅' : '❌';
             const userNum1 = (page - 1) * 40 + i + 1;
             row.push({ 
-                text: `${userNum1}. ${user1.userId} ${status1}`, 
+                text: `${userNum1}. ${user1.userId}`, 
                 callback_data: `user_detail_${user1.userId}` 
             });
             
             // Second user in row if exists
             if (i + 1 < users.length) {
                 const user2 = users[i + 1];
-                const status2 = user2.joinedAll ? '✅' : '❌';
                 const userNum2 = (page - 1) * 40 + i + 2;
                 row.push({ 
-                    text: `${userNum2}. ${user2.userId} ${status2}`, 
+                    text: `${userNum2}. ${user2.userId}`, 
                     callback_data: `user_detail_${user2.userId}` 
                 });
             }
@@ -1218,7 +1253,7 @@ bot.action('no_action', async (ctx) => {
     await ctx.answerCbQuery();
 });
 
-// User detail view - FIXED: Better user info display, removed code generation history
+// User detail view - FIXED: Removed code generation history
 bot.action(/^user_detail_(\d+)$/, async (ctx) => {
     try {
         const userId = ctx.match[1];
@@ -1239,10 +1274,10 @@ bot.action(/^user_detail_(\d+)$/, async (ctx) => {
         
         let userDetail = `<b>👤 User Details</b>\n\n`;
         userDetail += `• <b>ID:</b> <code>${userId}</code>\n`;
-        userDetail += `• <b>Username:</b> <code>${escapeForDisplay(username)}</code>\n`;
-        userDetail += `• <b>First Name:</b> <code>${escapeForDisplay(firstName)}</code>\n`;
-        userDetail += `• <b>Last Name:</b> <code>${escapeForDisplay(lastName)}</code>\n`;
-        userDetail += `• <b>Full Name:</b> <code>${escapeForDisplay(fullName)}</code>\n`;
+        userDetail += `• <b>Username:</b> <code>${escapeMarkdown(username)}</code>\n`;
+        userDetail += `• <b>First Name:</b> <code>${escapeMarkdown(firstName)}</code>\n`;
+        userDetail += `• <b>Last Name:</b> <code>${escapeMarkdown(lastName)}</code>\n`;
+        userDetail += `• <b>Full Name:</b> <code>${escapeMarkdown(fullName)}</code>\n`;
         userDetail += `• <b>Status:</b> ${isVerified}\n`;
         userDetail += `• <b>Joined:</b> <code>${joinedAt}</code>\n`;
         userDetail += `• <b>Last Active:</b> <code>${lastActive}</code>\n`;
@@ -1401,7 +1436,7 @@ bot.on('message', async (ctx) => {
                         adminId,
                         ctx.message.photo[ctx.message.photo.length - 1].file_id,
                         {
-                            caption: `<b>📩 Reply from user</b>\n\n<b>From:</b> ${escapeForDisplay(userInfo)}\n<b>ID:</b> <code>${fromUser.id}</code>\n\n${ctx.message.caption || ''}`,
+                            caption: `<b>📩 Reply from user</b>\n\n<b>From:</b> ${escapeMarkdown(userInfo)}\n<b>ID:</b> <code>${fromUser.id}</code>\n\n${ctx.message.caption || ''}`,
                             parse_mode: 'HTML',
                             reply_markup: {
                                 inline_keyboard: [[
@@ -1413,7 +1448,7 @@ bot.on('message', async (ctx) => {
                 } else if (ctx.message.text) {
                     await ctx.telegram.sendMessage(
                         adminId,
-                        `<b>📩 Reply from user</b>\n\n<b>From:</b> ${escapeForDisplay(userInfo)}\n<b>ID:</b> <code>${fromUser.id}</code>\n\n${ctx.message.text}`,
+                        `<b>📩 Reply from user</b>\n\n<b>From:</b> ${escapeMarkdown(userInfo)}\n<b>ID:</b> <code>${fromUser.id}</code>\n\n${ctx.message.text}`,
                         {
                             parse_mode: 'HTML',
                             reply_markup: {
@@ -1439,7 +1474,7 @@ bot.on('message', async (ctx) => {
 });
 
 // ==========================================
-// ADMIN FEATURES - START IMAGE (FIXED: Add name overlay option)
+// ADMIN FEATURES - START IMAGE (FIXED: {name} tag support with option)
 // ==========================================
 
 bot.action('admin_startimage', async (ctx) => {
@@ -1449,7 +1484,7 @@ bot.action('admin_startimage', async (ctx) => {
         const config = await db.collection('admin').findOne({ type: 'config' });
         const currentImage = config?.startImage || DEFAULT_CONFIG.startImage;
         
-        const text = `<b>🖼️ Start Image Management</b>\n\nCurrent Image:\n<code>${currentImage}</code>\n\n<i>Note: You can use {name} variable in URL for name overlay</i>\n\nSelect an option:`;
+        const text = `<b>🖼️ Start Image Management</b>\n\nCurrent Image:\n<code>${currentImage}</code>\n\nSelect an option:`;
         
         const keyboard = [
             [{ text: '✏️ Edit URL', callback_data: 'admin_edit_startimage_url' }, { text: '📤 Upload', callback_data: 'admin_upload_startimage' }],
@@ -1504,57 +1539,74 @@ scenes.editStartImage.on('text', async (ctx) => {
 });
 
 bot.action('admin_upload_startimage', async (ctx) => {
-    // Store in session that we're waiting for photo
-    ctx.session.uploadImageType = 'start_image';
-    
-    await safeSendMessage(ctx, 'Send the image you want to upload:\n\n<i>After uploading, you can choose if you want to add name overlay</i>\n\nType "cancel" to cancel.', {
-        parse_mode: 'HTML'
-    });
-    await ctx.scene.enter('edit_start_image_scene');
+    // Store that we're uploading start image
+    ctx.session.uploadingImageType = 'startImage';
+    await safeSendMessage(ctx, 'Send the image you want to upload:\n\nType "cancel" to cancel.');
+    await ctx.scene.enter('image_overlay_scene');
 });
 
-scenes.editStartImage.on('photo', async (ctx) => {
+// Image overlay scene for asking about name overlay
+scenes.imageOverlay.on('photo', async (ctx) => {
     try {
-        if (ctx.message.text?.toLowerCase() === 'cancel') {
-            await safeSendMessage(ctx, '❌ Upload cancelled.');
-            delete ctx.session.uploadImageType;
+        if (!ctx.session.uploadingImageType) {
+            await safeSendMessage(ctx, '❌ Session expired. Please start again.');
             await ctx.scene.leave();
             await showAdminPanel(ctx);
             return;
         }
         
-        // Check if we need to ask for name overlay preference
-        if (!ctx.session.nameOverlayAsked) {
-            ctx.session.nameOverlayAsked = true;
-            ctx.session.uploadedPhoto = ctx.message.photo[ctx.message.photo.length - 1];
-            
-            await safeSendMessage(ctx, 'Do you want to add name overlay to this image?\n\n<i>Name overlay will show user\'s name in the center of the image</i>', {
-                parse_mode: 'HTML',
-                reply_markup: {
-                    inline_keyboard: [
-                        [{ text: '✅ Yes, add name overlay', callback_data: 'upload_with_name_yes' }],
-                        [{ text: '❌ No, plain image', callback_data: 'upload_with_name_no' }],
-                        [{ text: '🚫 Cancel upload', callback_data: 'upload_cancel' }]
-                    ]
-                }
-            });
-            return;
-        }
+        // Store photo in session
+        ctx.session.uploadingImage = ctx.message.photo[ctx.message.photo.length - 1];
         
+        // Ask if they want name overlay
+        await safeSendMessage(ctx, 'Do you want to show {name} overlay on this image?\n\n<i>This will display the user\'s name in the middle of the image</i>', {
+            parse_mode: 'HTML',
+            reply_markup: {
+                inline_keyboard: [
+                    [{ text: '✅ Yes, show name', callback_data: 'overlay_yes' }],
+                    [{ text: '❌ No, plain image', callback_data: 'overlay_no' }],
+                    [{ text: '🚫 Cancel', callback_data: 'overlay_cancel' }]
+                ]
+            }
+        });
     } catch (error) {
-        console.error('Upload image error:', error);
-        await safeSendMessage(ctx, '❌ Failed to upload image.');
-        delete ctx.session.uploadImageType;
-        delete ctx.session.nameOverlayAsked;
-        delete ctx.session.uploadedPhoto;
+        console.error('Image overlay scene error:', error);
+        await safeSendMessage(ctx, '❌ Error processing image.');
         await ctx.scene.leave();
+        await showAdminPanel(ctx);
     }
 });
 
-// Handle name overlay choice for start image
-bot.action('upload_with_name_yes', async (ctx) => {
+// Handle overlay decision
+bot.action('overlay_yes', async (ctx) => {
+    await processImageUpload(ctx, true);
+});
+
+bot.action('overlay_no', async (ctx) => {
+    await processImageUpload(ctx, false);
+});
+
+bot.action('overlay_cancel', async (ctx) => {
     try {
-        const photo = ctx.session.uploadedPhoto;
+        await ctx.deleteMessage().catch(() => {});
+        await safeSendMessage(ctx, '❌ Upload cancelled.');
+        delete ctx.session.uploadingImageType;
+        delete ctx.session.uploadingImage;
+        await showAdminPanel(ctx);
+    } catch (error) {
+        console.error('Cancel overlay error:', error);
+    }
+});
+
+async function processImageUpload(ctx, addOverlay) {
+    try {
+        if (!ctx.session.uploadingImageType || !ctx.session.uploadingImage) {
+            await safeSendMessage(ctx, '❌ Session expired. Please start again.');
+            return;
+        }
+        
+        const imageType = ctx.session.uploadingImageType;
+        const photo = ctx.session.uploadingImage;
         const fileLink = await ctx.telegram.getFileLink(photo.file_id);
         const response = await fetch(fileLink);
         
@@ -1562,108 +1614,72 @@ bot.action('upload_with_name_yes', async (ctx) => {
         
         const buffer = await response.buffer();
         
-        // Upload to Cloudinary WITH name overlay
-        const result = await uploadToCloudinary(buffer, 'start_images', true);
+        // Upload to Cloudinary
+        const result = await uploadToCloudinary(buffer, `${imageType}_images`);
         
-        // Create URL with {name} variable
         let cloudinaryUrl = result.secure_url;
+        
+        // Add overlay if requested
+        if (addOverlay && imageType !== 'appImage') {
+            cloudinaryUrl = cloudinaryUrl.replace('/upload/', '/upload/l_text:Stalinist%20One_140_bold:{name},co_rgb:00e5ff,g_center/');
+        }
+        
+        // Update database based on image type
+        let updateField = {};
+        let imageTypeForDb = '';
+        
+        if (imageType === 'startImage') {
+            updateField = { startImage: cloudinaryUrl };
+            imageTypeForDb = 'start_image';
+        } else if (imageType === 'menuImage') {
+            updateField = { menuImage: cloudinaryUrl };
+            imageTypeForDb = 'menu_image';
+        }
         
         // Store uploaded image info
         await db.collection('admin').updateOne(
             { type: 'config' },
             { 
-                $set: { startImage: cloudinaryUrl, updatedAt: new Date() },
+                $set: { ...updateField, updatedAt: new Date() },
                 $push: { 
                     uploadedImages: {
                         url: cloudinaryUrl,
                         publicId: result.public_id,
-                        type: 'start_image',
-                        uploadedAt: new Date(),
-                        hasNameOverlay: true
+                        type: imageTypeForDb,
+                        hasOverlay: addOverlay,
+                        uploadedAt: new Date()
                     }
                 }
             }
         );
         
-        await ctx.answerCbQuery('✅ Uploading image with name overlay...');
-        await safeSendMessage(ctx, '✅ Image uploaded and set as start image!\n\n<i>Note: This image will show {name} overlay.</i>', {
-            parse_mode: 'HTML'
-        });
+        // Update overlay settings if needed
+        if (imageType === 'startImage') {
+            await db.collection('admin').updateOne(
+                { type: 'config' },
+                { $set: { 'imageOverlaySettings.startImage': addOverlay } }
+            );
+        } else if (imageType === 'menuImage') {
+            await db.collection('admin').updateOne(
+                { type: 'config' },
+                { $set: { 'imageOverlaySettings.menuImage': addOverlay } }
+            );
+        }
+        
+        await ctx.deleteMessage().catch(() => {});
+        await safeSendMessage(ctx, `✅ Image uploaded and set as ${imageType.replace('Image', ' image')}!\n\nOverlay: ${addOverlay ? '✅ Yes' : '❌ No'}`);
+        
+        // Clear session
+        delete ctx.session.uploadingImageType;
+        delete ctx.session.uploadingImage;
         
     } catch (error) {
-        console.error('Upload with name error:', error);
-        await ctx.answerCbQuery('❌ Failed to upload image');
+        console.error('Process image upload error:', error);
+        await safeSendMessage(ctx, '❌ Failed to upload image.');
     }
     
-    // Clear session
-    delete ctx.session.uploadImageType;
-    delete ctx.session.nameOverlayAsked;
-    delete ctx.session.uploadedPhoto;
-    
-    await ctx.deleteMessage().catch(() => {});
     await showAdminPanel(ctx);
-});
-
-bot.action('upload_with_name_no', async (ctx) => {
-    try {
-        const photo = ctx.session.uploadedPhoto;
-        const fileLink = await ctx.telegram.getFileLink(photo.file_id);
-        const response = await fetch(fileLink);
-        
-        if (!response.ok) throw new Error('Failed to fetch image');
-        
-        const buffer = await response.buffer();
-        
-        // Upload to Cloudinary WITHOUT name overlay
-        const result = await uploadToCloudinary(buffer, 'start_images', false);
-        
-        // Store uploaded image info
-        await db.collection('admin').updateOne(
-            { type: 'config' },
-            { 
-                $set: { startImage: result.secure_url, updatedAt: new Date() },
-                $push: { 
-                    uploadedImages: {
-                        url: result.secure_url,
-                        publicId: result.public_id,
-                        type: 'start_image',
-                        uploadedAt: new Date(),
-                        hasNameOverlay: false
-                    }
-                }
-            }
-        );
-        
-        await ctx.answerCbQuery('✅ Uploading plain image...');
-        await safeSendMessage(ctx, '✅ Image uploaded and set as start image!\n\n<i>Note: This image will NOT show name overlay.</i>', {
-            parse_mode: 'HTML'
-        });
-        
-    } catch (error) {
-        console.error('Upload without name error:', error);
-        await ctx.answerCbQuery('❌ Failed to upload image');
-    }
-    
-    // Clear session
-    delete ctx.session.uploadImageType;
-    delete ctx.session.nameOverlayAsked;
-    delete ctx.session.uploadedPhoto;
-    
-    await ctx.deleteMessage().catch(() => {});
-    await showAdminPanel(ctx);
-});
-
-bot.action('upload_cancel', async (ctx) => {
-    await ctx.answerCbQuery('❌ Upload cancelled');
-    
-    // Clear session
-    delete ctx.session.uploadImageType;
-    delete ctx.session.nameOverlayAsked;
-    delete ctx.session.uploadedPhoto;
-    
-    await ctx.deleteMessage().catch(() => {});
-    await showAdminPanel(ctx);
-});
+}
 
 bot.action('admin_reset_startimage', async (ctx) => {
     try {
@@ -1681,7 +1697,7 @@ bot.action('admin_reset_startimage', async (ctx) => {
 });
 
 // ==========================================
-// ADMIN FEATURES - START MESSAGE (FIXED: No backslash display)
+// ADMIN FEATURES - START MESSAGE (HTML support) - FIXED: Display issue
 // ==========================================
 
 bot.action('admin_startmessage', async (ctx) => {
@@ -1691,10 +1707,10 @@ bot.action('admin_startmessage', async (ctx) => {
         const config = await db.collection('admin').findOne({ type: 'config' });
         const currentMessage = config?.startMessage || DEFAULT_CONFIG.startMessage;
         
-        // Use <pre> tag to display the message without backslashes
-        const displayMessage = escapeForDisplay(currentMessage);
+        // Use formatMessageForDisplay to show message properly
+        const displayMessage = formatMessageForDisplay(currentMessage);
         
-        const text = `<b>📝 Start Message Management</b>\n\nCurrent Message:\n<pre>${displayMessage}</pre>\n\n<i>Available variables: {first_name}, {last_name}, {full_name}, {username}, {name}</i>\n\n<i>Supports HTML formatting</i>\n\nSelect an option:`;
+        const text = `<b>📝 Start Message Management</b>\n\nCurrent Message:\n<code>${escapeMarkdown(displayMessage)}</code>\n\n<i>Available variables: {first_name}, {last_name}, {full_name}, {username}, {name}</i>\n\n<i>Supports HTML formatting</i>\n\nSelect an option:`;
         
         const keyboard = [
             [{ text: '✏️ Edit', callback_data: 'admin_edit_startmessage' }, { text: '🔄 Reset', callback_data: 'admin_reset_startmessage' }],
@@ -1757,7 +1773,7 @@ bot.action('admin_reset_startmessage', async (ctx) => {
 });
 
 // ==========================================
-// ADMIN FEATURES - MENU IMAGE (FIXED: Add name overlay option)
+// ADMIN FEATURES - MENU IMAGE (FIXED: {name} tag support with option)
 // ==========================================
 
 bot.action('admin_menuimage', async (ctx) => {
@@ -1767,7 +1783,7 @@ bot.action('admin_menuimage', async (ctx) => {
         const config = await db.collection('admin').findOne({ type: 'config' });
         const currentImage = config?.menuImage || DEFAULT_CONFIG.menuImage;
         
-        const text = `<b>🖼️ Menu Image Management</b>\n\nCurrent Image:\n<code>${currentImage}</code>\n\n<i>Note: You can use {name} variable in URL for name overlay</i>\n\nSelect an option:`;
+        const text = `<b>🖼️ Menu Image Management</b>\n\nCurrent Image:\n<code>${currentImage}</code>\n\nSelect an option:`;
         
         const keyboard = [
             [{ text: '✏️ Edit URL', callback_data: 'admin_edit_menuimage_url' }, { text: '📤 Upload', callback_data: 'admin_upload_menuimage' }],
@@ -1822,165 +1838,10 @@ scenes.editMenuImage.on('text', async (ctx) => {
 });
 
 bot.action('admin_upload_menuimage', async (ctx) => {
-    // Store in session that we're waiting for photo
-    ctx.session.uploadImageType = 'menu_image';
-    
-    await safeSendMessage(ctx, 'Send the image you want to upload:\n\n<i>After uploading, you can choose if you want to add name overlay</i>\n\nType "cancel" to cancel.', {
-        parse_mode: 'HTML'
-    });
-    await ctx.scene.enter('edit_menu_image_scene');
-});
-
-scenes.editMenuImage.on('photo', async (ctx) => {
-    try {
-        if (ctx.message.text?.toLowerCase() === 'cancel') {
-            await safeSendMessage(ctx, '❌ Upload cancelled.');
-            delete ctx.session.uploadImageType;
-            await ctx.scene.leave();
-            await showAdminPanel(ctx);
-            return;
-        }
-        
-        // Check if we need to ask for name overlay preference
-        if (!ctx.session.nameOverlayAsked) {
-            ctx.session.nameOverlayAsked = true;
-            ctx.session.uploadedPhoto = ctx.message.photo[ctx.message.photo.length - 1];
-            
-            await safeSendMessage(ctx, 'Do you want to add name overlay to this image?\n\n<i>Name overlay will show user\'s name in the center of the image</i>', {
-                parse_mode: 'HTML',
-                reply_markup: {
-                    inline_keyboard: [
-                        [{ text: '✅ Yes, add name overlay', callback_data: 'upload_menu_with_name_yes' }],
-                        [{ text: '❌ No, plain image', callback_data: 'upload_menu_with_name_no' }],
-                        [{ text: '🚫 Cancel upload', callback_data: 'upload_menu_cancel' }]
-                    ]
-                }
-            });
-            return;
-        }
-        
-    } catch (error) {
-        console.error('Upload menu image error:', error);
-        await safeSendMessage(ctx, '❌ Failed to upload image.');
-        delete ctx.session.uploadImageType;
-        delete ctx.session.nameOverlayAsked;
-        delete ctx.session.uploadedPhoto;
-        await ctx.scene.leave();
-    }
-});
-
-// Handle name overlay choice for menu image
-bot.action('upload_menu_with_name_yes', async (ctx) => {
-    try {
-        const photo = ctx.session.uploadedPhoto;
-        const fileLink = await ctx.telegram.getFileLink(photo.file_id);
-        const response = await fetch(fileLink);
-        
-        if (!response.ok) throw new Error('Failed to fetch image');
-        
-        const buffer = await response.buffer();
-        
-        // Upload to Cloudinary WITH name overlay
-        const result = await uploadToCloudinary(buffer, 'menu_images', true);
-        
-        // Create URL with {name} variable
-        let cloudinaryUrl = result.secure_url;
-        
-        // Store uploaded image info
-        await db.collection('admin').updateOne(
-            { type: 'config' },
-            { 
-                $set: { menuImage: cloudinaryUrl, updatedAt: new Date() },
-                $push: { 
-                    uploadedImages: {
-                        url: cloudinaryUrl,
-                        publicId: result.public_id,
-                        type: 'menu_image',
-                        uploadedAt: new Date(),
-                        hasNameOverlay: true
-                    }
-                }
-            }
-        );
-        
-        await ctx.answerCbQuery('✅ Uploading image with name overlay...');
-        await safeSendMessage(ctx, '✅ Image uploaded and set as menu image!\n\n<i>Note: This image will show {name} overlay.</i>', {
-            parse_mode: 'HTML'
-        });
-        
-    } catch (error) {
-        console.error('Upload menu with name error:', error);
-        await ctx.answerCbQuery('❌ Failed to upload image');
-    }
-    
-    // Clear session
-    delete ctx.session.uploadImageType;
-    delete ctx.session.nameOverlayAsked;
-    delete ctx.session.uploadedPhoto;
-    
-    await ctx.deleteMessage().catch(() => {});
-    await showAdminPanel(ctx);
-});
-
-bot.action('upload_menu_with_name_no', async (ctx) => {
-    try {
-        const photo = ctx.session.uploadedPhoto;
-        const fileLink = await ctx.telegram.getFileLink(photo.file_id);
-        const response = await fetch(fileLink);
-        
-        if (!response.ok) throw new Error('Failed to fetch image');
-        
-        const buffer = await response.buffer();
-        
-        // Upload to Cloudinary WITHOUT name overlay
-        const result = await uploadToCloudinary(buffer, 'menu_images', false);
-        
-        // Store uploaded image info
-        await db.collection('admin').updateOne(
-            { type: 'config' },
-            { 
-                $set: { menuImage: result.secure_url, updatedAt: new Date() },
-                $push: { 
-                    uploadedImages: {
-                        url: result.secure_url,
-                        publicId: result.public_id,
-                        type: 'menu_image',
-                        uploadedAt: new Date(),
-                        hasNameOverlay: false
-                    }
-                }
-            }
-        );
-        
-        await ctx.answerCbQuery('✅ Uploading plain image...');
-        await safeSendMessage(ctx, '✅ Image uploaded and set as menu image!\n\n<i>Note: This image will NOT show name overlay.</i>', {
-            parse_mode: 'HTML'
-        });
-        
-    } catch (error) {
-        console.error('Upload menu without name error:', error);
-        await ctx.answerCbQuery('❌ Failed to upload image');
-    }
-    
-    // Clear session
-    delete ctx.session.uploadImageType;
-    delete ctx.session.nameOverlayAsked;
-    delete ctx.session.uploadedPhoto;
-    
-    await ctx.deleteMessage().catch(() => {});
-    await showAdminPanel(ctx);
-});
-
-bot.action('upload_menu_cancel', async (ctx) => {
-    await ctx.answerCbQuery('❌ Upload cancelled');
-    
-    // Clear session
-    delete ctx.session.uploadImageType;
-    delete ctx.session.nameOverlayAsked;
-    delete ctx.session.uploadedPhoto;
-    
-    await ctx.deleteMessage().catch(() => {});
-    await showAdminPanel(ctx);
+    // Store that we're uploading menu image
+    ctx.session.uploadingImageType = 'menuImage';
+    await safeSendMessage(ctx, 'Send the image you want to upload:\n\nType "cancel" to cancel.');
+    await ctx.scene.enter('image_overlay_scene');
 });
 
 bot.action('admin_reset_menuimage', async (ctx) => {
@@ -1999,7 +1860,7 @@ bot.action('admin_reset_menuimage', async (ctx) => {
 });
 
 // ==========================================
-// ADMIN FEATURES - MENU MESSAGE (FIXED: No backslash display)
+// ADMIN FEATURES - MENU MESSAGE (HTML support) - FIXED: Display issue
 // ==========================================
 
 bot.action('admin_menumessage', async (ctx) => {
@@ -2009,10 +1870,10 @@ bot.action('admin_menumessage', async (ctx) => {
         const config = await db.collection('admin').findOne({ type: 'config' });
         const currentMessage = config?.menuMessage || DEFAULT_CONFIG.menuMessage;
         
-        // Use <pre> tag to display the message without backslashes
-        const displayMessage = escapeForDisplay(currentMessage);
+        // Use formatMessageForDisplay to show message properly
+        const displayMessage = formatMessageForDisplay(currentMessage);
         
-        const text = `<b>📝 Menu Message Management</b>\n\nCurrent Message:\n<pre>${displayMessage}</pre>\n\n<i>Available variables: {first_name}, {last_name}, {full_name}, {username}, {name}</i>\n\n<i>Supports HTML formatting</i>\n\nSelect an option:`;
+        const text = `<b>📝 Menu Message Management</b>\n\nCurrent Message:\n<code>${escapeMarkdown(displayMessage)}</code>\n\n<i>Available variables: {first_name}, {last_name}, {full_name}, {username}, {name}</i>\n\n<i>Supports HTML formatting</i>\n\nSelect an option:`;
         
         const keyboard = [
             [{ text: '✏️ Edit', callback_data: 'admin_edit_menumessage' }, { text: '🔄 Reset', callback_data: 'admin_reset_menumessage' }],
@@ -2071,6 +1932,116 @@ bot.action('admin_reset_menumessage', async (ctx) => {
     } catch (error) {
         console.error('Reset menu message error:', error);
         await ctx.answerCbQuery('❌ Failed to reset message');
+    }
+});
+
+// ==========================================
+// ADMIN FEATURES - IMAGE OVERLAY SETTINGS
+// ==========================================
+
+bot.action('admin_image_overlay', async (ctx) => {
+    if (!await isAdmin(ctx.from.id)) return;
+    
+    try {
+        const config = await db.collection('admin').findOne({ type: 'config' });
+        const overlaySettings = config?.imageOverlaySettings || {
+            startImage: true,
+            menuImage: true,
+            appImages: true
+        };
+        
+        const text = `<b>⚙️ Image Overlay Settings</b>\n\nConfigure whether to show {name} overlay on images:\n\n• Start Image: ${overlaySettings.startImage ? '✅ ON' : '❌ OFF'}\n• Menu Image: ${overlaySettings.menuImage ? '✅ ON' : '❌ OFF'}\n• App Images: ${overlaySettings.appImages ? '✅ ON' : '❌ OFF'}\n\nSelect an option:`;
+        
+        const keyboard = [
+            [
+                { text: overlaySettings.startImage ? '✅ Start Image' : '❌ Start Image', callback_data: 'toggle_start_overlay' },
+                { text: overlaySettings.menuImage ? '✅ Menu Image' : '❌ Menu Image', callback_data: 'toggle_menu_overlay' }
+            ],
+            [
+                { text: overlaySettings.appImages ? '✅ App Images' : '❌ App Images', callback_data: 'toggle_app_overlay' }
+            ],
+            [{ text: '🔙 Back', callback_data: 'admin_back' }]
+        ];
+        
+        await safeEditMessage(ctx, text, {
+            reply_markup: { inline_keyboard: keyboard }
+        });
+    } catch (error) {
+        console.error('Image overlay menu error:', error);
+        await safeSendMessage(ctx, '❌ An error occurred.');
+    }
+});
+
+// Toggle overlay settings
+bot.action('toggle_start_overlay', async (ctx) => {
+    try {
+        const config = await db.collection('admin').findOne({ type: 'config' });
+        const currentSettings = config?.imageOverlaySettings || {
+            startImage: true,
+            menuImage: true,
+            appImages: true
+        };
+        
+        currentSettings.startImage = !currentSettings.startImage;
+        
+        await db.collection('admin').updateOne(
+            { type: 'config' },
+            { $set: { imageOverlaySettings: currentSettings, updatedAt: new Date() } }
+        );
+        
+        await ctx.answerCbQuery(`✅ Start image overlay ${currentSettings.startImage ? 'enabled' : 'disabled'}`);
+        await bot.action('admin_image_overlay')(ctx);
+    } catch (error) {
+        console.error('Toggle start overlay error:', error);
+        await ctx.answerCbQuery('❌ Failed to update setting');
+    }
+});
+
+bot.action('toggle_menu_overlay', async (ctx) => {
+    try {
+        const config = await db.collection('admin').findOne({ type: 'config' });
+        const currentSettings = config?.imageOverlaySettings || {
+            startImage: true,
+            menuImage: true,
+            appImages: true
+        };
+        
+        currentSettings.menuImage = !currentSettings.menuImage;
+        
+        await db.collection('admin').updateOne(
+            { type: 'config' },
+            { $set: { imageOverlaySettings: currentSettings, updatedAt: new Date() } }
+        );
+        
+        await ctx.answerCbQuery(`✅ Menu image overlay ${currentSettings.menuImage ? 'enabled' : 'disabled'}`);
+        await bot.action('admin_image_overlay')(ctx);
+    } catch (error) {
+        console.error('Toggle menu overlay error:', error);
+        await ctx.answerCbQuery('❌ Failed to update setting');
+    }
+});
+
+bot.action('toggle_app_overlay', async (ctx) => {
+    try {
+        const config = await db.collection('admin').findOne({ type: 'config' });
+        const currentSettings = config?.imageOverlaySettings || {
+            startImage: true,
+            menuImage: true,
+            appImages: true
+        };
+        
+        currentSettings.appImages = !currentSettings.appImages;
+        
+        await db.collection('admin').updateOne(
+            { type: 'config' },
+            { $set: { imageOverlaySettings: currentSettings, updatedAt: new Date() } }
+        );
+        
+        await ctx.answerCbQuery(`✅ App image overlay ${currentSettings.appImages ? 'enabled' : 'disabled'}`);
+        await bot.action('admin_image_overlay')(ctx);
+    } catch (error) {
+        console.error('Toggle app overlay error:', error);
+        await ctx.answerCbQuery('❌ Failed to update setting');
     }
 });
 
@@ -2179,7 +2150,7 @@ bot.action('list_all_images', async (ctx) => {
         images.forEach((img, index) => {
             text += `${index + 1}. <code>${img.url}</code>\n`;
             text += `   Type: ${img.type || 'unknown'}\n`;
-            text += `   Name Overlay: ${img.hasNameOverlay ? 'Yes' : 'No'}\n`;
+            text += `   Overlay: ${img.hasOverlay ? '✅ Yes' : '❌ No'}\n`;
             text += `   Uploaded: ${new Date(img.uploadedAt).toLocaleDateString()}\n\n`;
         });
         
@@ -2570,7 +2541,7 @@ bot.action(/^delete_channel_(.+)$/, async (ctx) => {
 });
 
 // ==========================================
-// ADMIN FEATURES - APP MANAGEMENT (FIXED: Add name overlay option)
+// ADMIN FEATURES - APP MANAGEMENT (FIXED: {name} tag for app images with option)
 // ==========================================
 
 bot.action('admin_apps', async (ctx) => {
@@ -2629,9 +2600,7 @@ scenes.addAppName.on('text', async (ctx) => {
             name: ctx.message.text
         };
         
-        await safeSendMessage(ctx, 'Send app image URL or photo (or send "none" for no image):\n\n<i>For URLs: Use {name} variable for name overlay (optional)</i>\n\nType "cancel" to cancel.', {
-            parse_mode: 'HTML'
-        });
+        await safeSendMessage(ctx, 'Send app image URL or photo (or send "none" for no image):\n\nType "cancel" to cancel.');
         await ctx.scene.leave();
         await ctx.scene.enter('add_app_image_scene');
     } catch (error) {
@@ -2652,166 +2621,63 @@ scenes.addAppImage.on(['text', 'photo'], async (ctx) => {
         
         if (ctx.message.text && ctx.message.text.toLowerCase() === 'none') {
             ctx.session.appData.image = 'none';
-            ctx.session.appData.hasNameOverlay = false;
         } else if (ctx.message.photo) {
-            // Store photo and ask about name overlay
-            ctx.session.uploadedPhoto = ctx.message.photo[ctx.message.photo.length - 1];
-            ctx.session.uploadImageType = 'app_image';
+            const photo = ctx.message.photo[ctx.message.photo.length - 1];
+            const fileLink = await ctx.telegram.getFileLink(photo.file_id);
+            const response = await fetch(fileLink);
             
-            await safeSendMessage(ctx, 'Do you want to add name overlay to this app image?\n\n<i>Name overlay will show user\'s name in the center of the image</i>', {
-                parse_mode: 'HTML',
-                reply_markup: {
-                    inline_keyboard: [
-                        [{ text: '✅ Yes, add name overlay', callback_data: 'upload_app_with_name_yes' }],
-                        [{ text: '❌ No, plain image', callback_data: 'upload_app_with_name_no' }],
-                        [{ text: '🚫 Cancel upload', callback_data: 'upload_app_cancel' }]
-                    ]
+            if (!response.ok) throw new Error('Failed to fetch image');
+            
+            const buffer = await response.buffer();
+            
+            // Upload to Cloudinary
+            const result = await uploadToCloudinary(buffer, 'app_images');
+            
+            let cloudinaryUrl = result.secure_url;
+            
+            // Check overlay settings
+            const config = await db.collection('admin').findOne({ type: 'config' });
+            const overlaySettings = config?.imageOverlaySettings || { appImages: true };
+            
+            if (overlaySettings.appImages) {
+                cloudinaryUrl = cloudinaryUrl.replace('/upload/', '/upload/l_text:Stalinist%20One_140_bold:{name},co_rgb:00e5ff,g_center/');
+            }
+            
+            ctx.session.appData.image = cloudinaryUrl;
+            ctx.session.appData.cloudinaryId = result.public_id;
+            ctx.session.appData.hasOverlay = overlaySettings.appImages;
+            
+            // Store uploaded image info
+            await db.collection('admin').updateOne(
+                { type: 'config' },
+                { 
+                    $push: { 
+                        uploadedImages: {
+                            url: cloudinaryUrl,
+                            publicId: result.public_id,
+                            type: 'app_image',
+                            hasOverlay: overlaySettings.appImages,
+                            uploadedAt: new Date(),
+                            appName: ctx.session.appData.name
+                        }
+                    }
                 }
-            });
-            return;
+            );
         } else if (ctx.message.text) {
             ctx.session.appData.image = ctx.message.text;
-            ctx.session.appData.hasNameOverlay = ctx.message.text.includes('{name}');
         } else {
             await safeSendMessage(ctx, '❌ Please send an image or "none".');
             return;
         }
         
-        // If we didn't upload a photo (or it was URL/none), continue
-        if (ctx.session.appData.image !== undefined && ctx.session.appData.image !== 'photo_upload') {
-            await safeSendMessage(ctx, 'How many codes to generate? (1-10):');
-            await ctx.scene.leave();
-            await ctx.scene.enter('add_app_code_count_scene');
-        }
-        
+        await safeSendMessage(ctx, 'How many codes to generate? (1-10):');
+        await ctx.scene.leave();
+        await ctx.scene.enter('add_app_code_count_scene');
     } catch (error) {
         console.error('Add app image error:', error);
         await safeSendMessage(ctx, '❌ Failed to process image. Please try again.');
         await ctx.scene.leave();
     }
-});
-
-// Handle name overlay choice for app image
-bot.action('upload_app_with_name_yes', async (ctx) => {
-    try {
-        const photo = ctx.session.uploadedPhoto;
-        const fileLink = await ctx.telegram.getFileLink(photo.file_id);
-        const response = await fetch(fileLink);
-        
-        if (!response.ok) throw new Error('Failed to fetch image');
-        
-        const buffer = await response.buffer();
-        
-        // Upload to Cloudinary WITH name overlay
-        const result = await uploadToCloudinary(buffer, 'app_images', true);
-        
-        ctx.session.appData.image = result.secure_url;
-        ctx.session.appData.cloudinaryId = result.public_id;
-        ctx.session.appData.hasNameOverlay = true;
-        
-        // Store uploaded image info
-        await db.collection('admin').updateOne(
-            { type: 'config' },
-            { 
-                $push: { 
-                    uploadedImages: {
-                        url: result.secure_url,
-                        publicId: result.public_id,
-                        type: 'app_image',
-                        uploadedAt: new Date(),
-                        hasNameOverlay: true,
-                        appName: ctx.session.appData.name
-                    }
-                }
-            }
-        );
-        
-        await ctx.answerCbQuery('✅ Image uploaded with name overlay');
-        
-    } catch (error) {
-        console.error('Upload app with name error:', error);
-        await ctx.answerCbQuery('❌ Failed to upload image');
-        ctx.session.appData.image = 'none';
-    }
-    
-    // Clear upload session
-    delete ctx.session.uploadedPhoto;
-    delete ctx.session.uploadImageType;
-    
-    await ctx.deleteMessage().catch(() => {});
-    
-    // Continue with app creation
-    await safeSendMessage(ctx, 'How many codes to generate? (1-10):');
-    await ctx.scene.enter('add_app_code_count_scene');
-});
-
-bot.action('upload_app_with_name_no', async (ctx) => {
-    try {
-        const photo = ctx.session.uploadedPhoto;
-        const fileLink = await ctx.telegram.getFileLink(photo.file_id);
-        const response = await fetch(fileLink);
-        
-        if (!response.ok) throw new Error('Failed to fetch image');
-        
-        const buffer = await response.buffer();
-        
-        // Upload to Cloudinary WITHOUT name overlay
-        const result = await uploadToCloudinary(buffer, 'app_images', false);
-        
-        ctx.session.appData.image = result.secure_url;
-        ctx.session.appData.cloudinaryId = result.public_id;
-        ctx.session.appData.hasNameOverlay = false;
-        
-        // Store uploaded image info
-        await db.collection('admin').updateOne(
-            { type: 'config' },
-            { 
-                $push: { 
-                    uploadedImages: {
-                        url: result.secure_url,
-                        publicId: result.public_id,
-                        type: 'app_image',
-                        uploadedAt: new Date(),
-                        hasNameOverlay: false,
-                        appName: ctx.session.appData.name
-                    }
-                }
-            }
-        );
-        
-        await ctx.answerCbQuery('✅ Image uploaded without name overlay');
-        
-    } catch (error) {
-        console.error('Upload app without name error:', error);
-        await ctx.answerCbQuery('❌ Failed to upload image');
-        ctx.session.appData.image = 'none';
-    }
-    
-    // Clear upload session
-    delete ctx.session.uploadedPhoto;
-    delete ctx.session.uploadImageType;
-    
-    await ctx.deleteMessage().catch(() => {});
-    
-    // Continue with app creation
-    await safeSendMessage(ctx, 'How many codes to generate? (1-10):');
-    await ctx.scene.enter('add_app_code_count_scene');
-});
-
-bot.action('upload_app_cancel', async (ctx) {
-    await ctx.answerCbQuery('❌ Upload cancelled');
-    
-    // Clear session
-    delete ctx.session.uploadedPhoto;
-    delete ctx.session.uploadImageType;
-    
-    ctx.session.appData.image = 'none';
-    
-    await ctx.deleteMessage().catch(() => {});
-    
-    // Continue with app creation
-    await safeSendMessage(ctx, 'How many codes to generate? (1-10):');
-    await ctx.scene.enter('add_app_code_count_scene');
 });
 
 scenes.addAppCodeCount.on('text', async (ctx) => {
@@ -2908,7 +2774,7 @@ scenes.addAppCodeMessage.on('text', async (ctx) => {
             codeLengths: appData.codeLengths || Array(appData.codeCount || 1).fill(8),
             codeMessage: ctx.message.text || 'Your code: {code1}',
             cloudinaryId: appData.cloudinaryId,
-            hasNameOverlay: appData.hasNameOverlay || false,
+            hasOverlay: appData.hasOverlay || false,
             createdAt: new Date()
         };
         
@@ -2927,7 +2793,7 @@ scenes.addAppCodeMessage.on('text', async (ctx) => {
             { $push: { apps: app } }
         );
         
-        await safeSendMessage(ctx, `✅ <b>App "${app.name}" added successfully!</b>\n\n• <b>Codes:</b> ${app.codeCount}\n• <b>Image:</b> ${app.image === 'none' ? 'None' : 'Set'}\n• <b>Name Overlay:</b> ${app.hasNameOverlay ? 'Yes' : 'No'}\n• <b>Prefixes:</b> ${app.codePrefixes.filter(p => p).join(', ') || 'None'}\n• <b>Lengths:</b> ${app.codeLengths.join(', ')}`, {
+        await safeSendMessage(ctx, `✅ <b>App "${app.name}" added successfully!</b>\n\n• <b>Codes:</b> ${app.codeCount}\n• <b>Image:</b> ${app.image === 'none' ? 'None' : 'Set'}\n• <b>Overlay:</b> ${app.hasOverlay ? 'Yes' : 'No'}\n• <b>Prefixes:</b> ${app.codePrefixes.filter(p => p).join(', ') || 'None'}\n• <b>Lengths:</b> ${app.codeLengths.join(', ')}`, {
             parse_mode: 'HTML'
         });
         
