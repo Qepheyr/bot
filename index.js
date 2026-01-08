@@ -67,11 +67,13 @@ const scenes = {
     addPrivateChannelLink: createScene('add_private_channel_link_scene'),
     
     // App scenes
-    addAppName: createScene('add_app_name_scene'),
-    addAppImage: createScene('add_app_image_scene'),
-    addAppCodeCount: createScene('add_app_code_count_scene'),
-    addAppCodes: createScene('add_app_codes_scene'),
-    addAppCodeMessage: createScene('add_app_code_message_scene'),
+    // App scenes
+addAppName: createScene('add_app_name_scene'),
+addAppImage: createScene('add_app_image_scene'),
+addAppCodeCount: createScene('add_app_code_count_scene'),
+addAppCodePrefixes: createScene('add_app_code_prefixes_scene'),  // ADD THIS LINE
+addAppCodeLengths: createScene('add_app_code_lengths_scene'),    // ADD THIS LINE
+addAppCodeMessage: createScene('add_app_code_message_scene'),
     
     // Contact user scenes
     contactUserMessage: createScene('contact_user_message_scene'),
@@ -163,6 +165,24 @@ async function initBot() {
 // ==========================================
 // HELPER FUNCTIONS
 // ==========================================
+
+// Generate Random Code - FIXED: Proper code generation
+function generateCode(prefix = '', length = 8) {
+    try {
+        const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+        let code = prefix.toUpperCase(); // Ensure prefix is uppercase
+        
+        // Generate random characters for remaining length
+        for (let i = code.length; i < length; i++) {
+            code += characters.charAt(Math.floor(Math.random() * characters.length));
+        }
+        
+        return code;
+    } catch (error) {
+        // Fallback code generation
+        return prefix.toUpperCase() + Math.random().toString(36).substr(2, length - prefix.length).toUpperCase();
+    }
+}
 
 // Escape markdown characters
 function escapeMarkdown(text) {
@@ -897,9 +917,8 @@ bot.action('back_to_start', async (ctx) => {
 bot.action('no_apps', async (ctx) => {
     await ctx.answerCbQuery('No apps available yet. Please check back later.');
 });
-
 // ==========================================
-// APP CODE DISPLAY - MODIFIED: Admin adds codes manually
+// APP CODE GENERATION - FIXED
 // ==========================================
 
 bot.action(/^app_(.+)$/, async (ctx) => {
@@ -932,7 +951,7 @@ bot.action(/^app_(.+)$/, async (ctx) => {
             const timeStr = formatTimeRemaining(remaining);
             
             await safeSendMessage(ctx, 
-                `⏰ <b>Please Wait</b>\n\nYou can view codes for <b>${escapeMarkdown(app.name)}</b> in:\n<code>${timeStr}</code>`
+                `⏰ <b>Please Wait</b>\n\nYou can generate new codes for <b>${escapeMarkdown(app.name)}</b> in:\n<code>${timeStr}</code>`
             );
             
             await safeSendMessage(ctx, '🔙 Back to Menu', {
@@ -945,6 +964,19 @@ bot.action(/^app_(.+)$/, async (ctx) => {
             return;
         }
         
+        // Generate codes - FIXED: Proper generation
+        const codes = [];
+        const codeCount = app.codeCount || 1;
+        const codePrefixes = app.codePrefixes || [];
+        const codeLengths = app.codeLengths || [];
+        
+        for (let i = 0; i < codeCount; i++) {
+            const prefix = codePrefixes[i] || '';
+            const length = codeLengths[i] || 8;
+            const code = generateCode(prefix, length);
+            codes.push(code);
+        }
+        
         // Prepare variables
         const userVars = getUserVariables(ctx.from);
         const appVars = {
@@ -952,23 +984,25 @@ bot.action(/^app_(.+)$/, async (ctx) => {
             button_name: app.name
         };
         
-        // Add code variables from manually added codes
-        let hasCodes = false;
-        if (app.codes && app.codes.length > 0) {
-            hasCodes = true;
-            app.codes.forEach((code, index) => {
-                appVars[`code${index + 1}`] = `<code>${code}</code>`;
-            });
-        }
+        // Add code variables
+        codes.forEach((code, index) => {
+            appVars[`code${index + 1}`] = `<code>${code}</code>`;
+        });
         
         // Replace variables in message
         let message = app.codeMessage || 'Your code: {code1}';
         message = replaceVariables(message, userVars);
         message = replaceVariables(message, appVars);
         
-        // If no codes were added by admin, show message
-        if (!hasCodes) {
-            message = '⚠️ <b>No codes available</b>\n\nPlease contact admin for codes.';
+        // Format codes nicely
+        let formattedCodes = '';
+        codes.forEach((code, index) => {
+            formattedCodes += `• <code>${code}</code>\n`;
+        });
+        
+        // Add formatted codes to message
+        if (!message.includes('{code')) {
+            message += `\n\n${formattedCodes}`;
         }
         
         // Send app image if available
@@ -1004,20 +1038,20 @@ bot.action(/^app_(.+)$/, async (ctx) => {
             { $set: { [`codeTimestamps.${appId}`]: now } }
         );
         
-        // Log code view
-        console.log(`✅ User ${userId} viewed codes for app: ${app.name}`);
+        // Log code generation
+        console.log(`✅ Generated ${codes.length} codes for user ${userId}: ${codes.join(', ')}`);
         
     } catch (error) {
         console.error('App selection error:', error);
         // Store error for reporting
         ctx.session.lastError = {
-            function: 'app_code_display',
+            function: 'app_code_generation',
             appId: ctx.match[1],
             error: error.message,
             stack: error.stack
         };
         
-        await safeSendMessage(ctx, '❌ An error occurred while displaying codes. Please try again.', {
+        await safeSendMessage(ctx, '❌ An error occurred while generating codes. Please try again.', {
             reply_markup: {
                 inline_keyboard: [[
                     { text: '🔙 Back to Menu', callback_data: 'back_to_menu' },
@@ -2750,7 +2784,7 @@ bot.action(/^delete_channel_(.+)$/, async (ctx) => {
 });
 
 // ==========================================
-// ADMIN FEATURES - APP MANAGEMENT (MODIFIED: Admin adds codes manually)
+// ADMIN FEATURES - APP MANAGEMENT (FIXED: {name} tag for app images with option)
 // ==========================================
 
 bot.action('admin_apps', async (ctx) => {
@@ -2766,8 +2800,7 @@ bot.action('admin_apps', async (ctx) => {
             text += 'No apps added yet.\n';
         } else {
             apps.forEach((app, index) => {
-                const codeCount = app.codes ? app.codes.length : 0;
-                text += `${index + 1}. ${app.name} (${codeCount} codes)\n`;
+                text += `${index + 1}. ${app.name} (${app.codeCount || 1} codes)\n`;
             });
         }
         
@@ -2897,9 +2930,7 @@ scenes.addAppImage.on(['text', 'photo'], async (ctx) => {
             return;
         }
         
-        await safeSendMessage(ctx, 'How many codes do you want to add? (1-10):\n\n<i>You will enter each code manually</i>', {
-            parse_mode: 'HTML'
-        });
+        await safeSendMessage(ctx, 'How many codes to generate? (1-10):');
         await ctx.scene.leave();
         await ctx.scene.enter('add_app_code_count_scene');
     } catch (error) {
@@ -2919,9 +2950,7 @@ bot.action(/^confirm_bad_url_app_(.+)$/, async (ctx) => {
             ctx.session.appData.hasOverlay = hasNameVariable(url);
             
             await ctx.deleteMessage().catch(() => {});
-            await safeSendMessage(ctx, 'How many codes do you want to add? (1-10):\n\n<i>You will enter each code manually</i>', {
-                parse_mode: 'HTML'
-            });
+            await safeSendMessage(ctx, 'How many codes to generate? (1-10):');
             await ctx.scene.enter('add_app_code_count_scene');
         }
     } catch (error) {
@@ -2946,13 +2975,10 @@ scenes.addAppCodeCount.on('text', async (ctx) => {
         }
         
         ctx.session.appData.codeCount = count;
-        ctx.session.appData.codes = []; // Initialize empty codes array
         
-        await safeSendMessage(ctx, `Now enter code #1:\n\n<i>You'll enter ${count} codes total</i>`, {
-            parse_mode: 'HTML'
-        });
+        await safeSendMessage(ctx, 'Enter prefixes for each code (separated by commas):\nExample: XY,AB,CD\nLeave empty for no prefixes.');
         await ctx.scene.leave();
-        await ctx.scene.enter('add_app_codes_scene');
+        await ctx.scene.enter('add_app_code_prefixes_scene');
     } catch (error) {
         console.error('Add app code count error:', error);
         await safeSendMessage(ctx, '❌ An error occurred.');
@@ -2960,8 +2986,7 @@ scenes.addAppCodeCount.on('text', async (ctx) => {
     }
 });
 
-// New scene for adding codes manually
-scenes.addAppCodes.on('text', async (ctx) => {
+scenes.addAppCodePrefixes.on('text', async (ctx) => {
     try {
         if (!ctx.session.appData) {
             await safeSendMessage(ctx, '❌ Session expired. Please start again.');
@@ -2970,37 +2995,38 @@ scenes.addAppCodes.on('text', async (ctx) => {
             return;
         }
         
-        const code = ctx.message.text.trim();
-        if (!code) {
-            await safeSendMessage(ctx, '❌ Please enter a valid code.');
+        const prefixes = ctx.message.text.split(',').map(p => p.trim()).filter(p => p);
+        ctx.session.appData.codePrefixes = prefixes;
+        
+        await safeSendMessage(ctx, 'Enter code lengths for each code (separated by commas, min 6):\nExample: 8,10,12\nDefault is 8 for all codes.');
+        await ctx.scene.leave();
+        await ctx.scene.enter('add_app_code_lengths_scene');
+    } catch (error) {
+        console.error('Add app prefixes error:', error);
+        await safeSendMessage(ctx, '❌ An error occurred.');
+        await ctx.scene.leave();
+    }
+});
+
+scenes.addAppCodeLengths.on('text', async (ctx) => {
+    try {
+        if (!ctx.session.appData) {
+            await safeSendMessage(ctx, '❌ Session expired. Please start again.');
+            await ctx.scene.leave();
+            await showAdminPanel(ctx);
             return;
         }
         
-        // Store the code
-        if (!ctx.session.appData.codes) {
-            ctx.session.appData.codes = [];
-        }
+        const lengths = ctx.message.text.split(',').map(l => parseInt(l.trim())).filter(l => !isNaN(l) && l >= 6);
+        ctx.session.appData.codeLengths = lengths;
         
-        ctx.session.appData.codes.push(code);
-        
-        const enteredCount = ctx.session.appData.codes.length;
-        const totalCount = ctx.session.appData.codeCount;
-        
-        if (enteredCount < totalCount) {
-            // Ask for next code
-            await safeSendMessage(ctx, `Enter code #${enteredCount + 1}:\n\n<i>${enteredCount}/${totalCount} codes entered</i>`, {
-                parse_mode: 'HTML'
-            });
-        } else {
-            // All codes entered, ask for message template
-            await safeSendMessage(ctx, 'All codes entered! Now enter the code message template:\n\n<b>Available variables:</b>\n{first_name}, {last_name}, {full_name}, {username}, {name}\n{app_name}, {button_name}\n{code1}, {code2}, ... {code10}\n\n<i>Supports HTML formatting</i>\n\nExample: "Your codes for {app_name} are:\n{code1}\n{code2}"', {
-                parse_mode: 'HTML'
-            });
-            await ctx.scene.leave();
-            await ctx.scene.enter('add_app_code_message_scene');
-        }
+        await safeSendMessage(ctx, 'Enter the code message template:\n\n<b>Available variables:</b>\n{first_name}, {last_name}, {full_name}, {username}, {name}\n{app_name}, {button_name}\n{code1}, {code2}, ... {code10}\n\n<i>Supports HTML formatting</i>\n\nExample: "Your codes for {app_name} are:\n{code1}\n{code2}"', {
+            parse_mode: 'HTML'
+        });
+        await ctx.scene.leave();
+        await ctx.scene.enter('add_app_code_message_scene');
     } catch (error) {
-        console.error('Add app codes error:', error);
+        console.error('Add app lengths error:', error);
         await safeSendMessage(ctx, '❌ An error occurred.');
         await ctx.scene.leave();
     }
@@ -3022,13 +3048,23 @@ scenes.addAppCodeMessage.on('text', async (ctx) => {
             id: `app_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
             name: appData.name,
             image: appData.image || 'none',
-            codes: appData.codes || [],
-            codeCount: appData.codes ? appData.codes.length : 0,
-            codeMessage: ctx.message.text || 'Your codes: {code1}',
+            codeCount: appData.codeCount || 1,
+            codePrefixes: appData.codePrefixes || [],
+            codeLengths: appData.codeLengths || Array(appData.codeCount || 1).fill(8),
+            codeMessage: ctx.message.text || 'Your code: {code1}',
             cloudinaryId: appData.cloudinaryId,
             hasOverlay: appData.hasOverlay || false,
             createdAt: new Date()
         };
+        
+        // Ensure arrays have correct length
+        while (app.codePrefixes.length < app.codeCount) {
+            app.codePrefixes.push('');
+        }
+        
+        while (app.codeLengths.length < app.codeCount) {
+            app.codeLengths.push(8);
+        }
         
         // Add to database
         await db.collection('admin').updateOne(
@@ -3036,13 +3072,7 @@ scenes.addAppCodeMessage.on('text', async (ctx) => {
             { $push: { apps: app } }
         );
         
-        // Format codes for display
-        let codesDisplay = '';
-        app.codes.forEach((code, index) => {
-            codesDisplay += `• <code>${code}</code>\n`;
-        });
-        
-        await safeSendMessage(ctx, `✅ <b>App "${app.name}" added successfully!</b>\n\n• <b>Codes:</b> ${app.codeCount}\n• <b>Image:</b> ${app.image === 'none' ? 'None' : 'Set'}\n• <b>Overlay:</b> ${app.hasOverlay ? 'Yes' : 'No'}\n\n<b>Codes added:</b>\n${codesDisplay}`, {
+        await safeSendMessage(ctx, `✅ <b>App "${app.name}" added successfully!</b>\n\n• <b>Codes:</b> ${app.codeCount}\n• <b>Image:</b> ${app.image === 'none' ? 'None' : 'Set'}\n• <b>Overlay:</b> ${app.hasOverlay ? 'Yes' : 'No'}\n• <b>Prefixes:</b> ${app.codePrefixes.filter(p => p).join(', ') || 'None'}\n• <b>Lengths:</b> ${app.codeLengths.join(', ')}`, {
             parse_mode: 'HTML'
         });
         
