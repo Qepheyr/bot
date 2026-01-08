@@ -3,9 +3,9 @@
 Bot running on Railway with MongoDB.
 
 ## Bot Token
-8157925136:AAFPNIG6ipDPyAnwqc9cgIvBa2pcqVDfrW8
+8525520014:AAHuBfHMb1yQrrKNjAkQwagl9UW3bKIgHS0
 ## Admin ID
-8435248854
+7001248146
 
 ## MongoDB
 Connected to MongoDB Atlas
