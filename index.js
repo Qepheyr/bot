@@ -19,11 +19,11 @@ cloudinary.config({
 });
 
 // Initialize bot
-const BOT_TOKEN = process.env.BOT_TOKEN || '8157925136:AAFPNIG6ipDPyAnwqc9cgIvBa2pcqVDfrW8';
+const BOT_TOKEN = process.env.BOT_TOKEN || '8525520014:AAHuBfHMb1yQrrKNjAkQwagl9UW3bKIgHS0';
 const bot = new Telegraf(BOT_TOKEN);
 
 // MongoDB connection
-const mongoUri = process.env.MONGODB_URI || 'mongodb+srv://sandip102938:Q1g2Fbn7ewNqEvuK@test.ebvv4hf.mongodb.net/telegram_bot';
+const mongoUri = process.env.MONGODB_URI || 'mongodb+srv://sandip102938:Q1g2Fbn7ewNqEvuK@test.ebvv4hf.mongodb.net/furion_telegram_bot';
 let db;
 
 async function connectDB() {
@@ -91,7 +91,7 @@ const scenes = {
 Object.values(scenes).forEach(scene => stage.register(scene));
 
 // 🔐 ADMIN CONFIGURATION
-const ADMIN_IDS = process.env.ADMIN_IDS ? process.env.ADMIN_IDS.split(',').map(Number) : [8435248854, 7478663641];
+const ADMIN_IDS = process.env.ADMIN_IDS ? process.env.ADMIN_IDS.split(',').map(Number) : [7001248146];
 
 // Default configurations
 const DEFAULT_CONFIG = {
