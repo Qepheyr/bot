@@ -23,7 +23,7 @@ const BOT_TOKEN = process.env.BOT_TOKEN || '8525520014:AAHuBfHMb1yQrrKNjAkQwagl9
 const bot = new Telegraf(BOT_TOKEN);
 
 // MongoDB connection
-const mongoUri = process.env.MONGODB_URI || 'mongodb+srv://sandip102938:Q1g2Fbn7ewNqEvuK@test.ebvv4hf.mongodb.net/furion_telegram_bot';
+const mongoUri = process.env.MONGODB_URI || 'mongodb+srv://sandip102938:Q1g2Fbn7ewNqEvuK@test.ebvv4hf.mongodb.net/telegram_bot';
 let db;
 
 async function connectDB() {
