@@ -3,6 +3,8 @@
 // ==========================================
 // Fixed: All bugs, proper flow, pagination, contact system
 // Added: Name overlay option for images
+// Added: Chat join request approval
+// Modified: Admin adds codes manually instead of auto-generation
 // ==========================================
 
 const { Telegraf, Scenes, session, Markup } = require('telegraf');
@@ -20,7 +22,7 @@ cloudinary.config({
 });
 
 // Initialize bot
-const BOT_TOKEN = process.env.BOT_TOKEN || '8525520014:AAHuBfHMb1yQrrKNjAkQwagl9UW3bKIgHS0';
+const BOT_TOKEN = process.env.BOT_TOKEN || '8525520014:AAHuBfHMb1yQrrKNjAkQwagl9UW3bKIgHS0' ;
 const bot = new Telegraf(BOT_TOKEN);
 
 // MongoDB connection
@@ -56,16 +58,19 @@ const scenes = {
     broadcast: createScene('broadcast_scene'),
     
     // Channel scenes
-    addChannelName: createScene('add_channel_name_scene'),
-    addChannelLink: createScene('add_channel_link_scene'),
-    addChannelId: createScene('add_channel_id_scene'),
+    addChannelType: createScene('add_channel_type_scene'),
+    addPublicChannelName: createScene('add_public_channel_name_scene'),
+    addPublicChannelId: createScene('add_public_channel_id_scene'),
+    addPublicChannelLink: createScene('add_public_channel_link_scene'),
+    addPrivateChannelName: createScene('add_private_channel_name_scene'),
+    addPrivateChannelId: createScene('add_private_channel_id_scene'),
+    addPrivateChannelLink: createScene('add_private_channel_link_scene'),
     
     // App scenes
     addAppName: createScene('add_app_name_scene'),
     addAppImage: createScene('add_app_image_scene'),
     addAppCodeCount: createScene('add_app_code_count_scene'),
-    addAppCodePrefixes: createScene('add_app_code_prefixes_scene'),
-    addAppCodeLengths: createScene('add_app_code_lengths_scene'),
+    addAppCodes: createScene('add_app_codes_scene'),
     addAppCodeMessage: createScene('add_app_code_message_scene'),
     
     // Contact user scenes
@@ -97,7 +102,7 @@ const scenes = {
 Object.values(scenes).forEach(scene => stage.register(scene));
 
 // 🔐 ADMIN CONFIGURATION
-const ADMIN_IDS = process.env.ADMIN_IDS ? process.env.ADMIN_IDS.split(',').map(Number) : [8435248854, 7001248146];
+const ADMIN_IDS = process.env.ADMIN_IDS ? process.env.ADMIN_IDS.split(',').map(Number) : [8435248854,7001248146 ];
 
 // Default configurations
 const DEFAULT_CONFIG = {
@@ -306,24 +311,6 @@ async function getUnjoinedChannels(userId) {
     }
 }
 
-// Generate Random Code - FIXED: Proper code generation
-function generateCode(prefix = '', length = 8) {
-    try {
-        const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-        let code = prefix.toUpperCase(); // Ensure prefix is uppercase
-        
-        // Generate random characters for remaining length
-        for (let i = code.length; i < length; i++) {
-            code += characters.charAt(Math.floor(Math.random() * characters.length));
-        }
-        
-        return code;
-    } catch (error) {
-        // Fallback code generation
-        return prefix.toUpperCase() + Math.random().toString(36).substr(2, length - prefix.length).toUpperCase();
-    }
-}
-
 // Format Time Remaining
 function formatTimeRemaining(seconds) {
     try {
@@ -511,17 +498,85 @@ async function getPaginatedUsers(page = 1, limit = 40) {
 // Format message for display (remove escaping)
 function formatMessageForDisplay(text) {
     if (!text) return '';
-    // Remove extra escaping for display
-    return text.replace(/\\_/g, '_')
-               .replace(/\\\*/g, '*')
-               .replace(/\\\[/g, '[')
-               .replace(/\\\]/g, ']')
-               .replace(/\\\(/g, '(')
-               .replace(/\\\)/g, ')')
-               .replace(/\\\./g, '.')
-               .replace(/\\\!/g, '!')
-               .replace(/\\\-/g, '-');
+    // Remove markdown escaping but keep the actual content
+    return text.replace(/\\([\\_*[\]()~`>#+\-=|{}.!-])/g, '$1');
 }
+
+// Check if URL contains {name} variable
+function hasNameVariable(url) {
+    return url && url.includes('{name}');
+}
+
+// Check if image URL is valid
+async function isValidImageUrl(url) {
+    try {
+        if (!url.startsWith('http')) return false;
+        const response = await fetch(url, { method: 'HEAD' });
+        const contentType = response.headers.get('content-type');
+        return contentType && contentType.startsWith('image/');
+    } catch (error) {
+        return false;
+    }
+}
+
+// ==========================================
+// CHAT JOIN REQUEST HANDLER - NEW: Auto-approve users
+// ==========================================
+
+bot.on('chat_join_request', async (ctx) => {
+    try {
+        const userId = ctx.chatJoinRequest.from.id;
+        const chatId = ctx.chatJoinRequest.chat.id;
+        
+        console.log(`📨 Join request from user ${userId} for chat ${chatId}`);
+        
+        // Get config to check if this is one of our channels
+        const config = await db.collection('admin').findOne({ type: 'config' });
+        const channels = config?.channels || [];
+        
+        // Check if this chat is in our channel list
+        const channel = channels.find(ch => String(ch.id) === String(chatId));
+        
+        if (channel) {
+            try {
+                // Approve the join request
+                await bot.telegram.approveChatJoinRequest(chatId, userId);
+                console.log(`✅ Approved join request for user ${userId} in channel ${channel.title}`);
+                
+                // Notify admin
+                await notifyAdmin(`✅ <b>Join Request Approved</b>\n\n👤 User: ${userId}\n📺 Channel: ${channel.title}\n🔗 Type: ${channel.type}`);
+                
+                // Check if user has joined all channels now
+                setTimeout(async () => {
+                    try {
+                        const user = await db.collection('users').findOne({ userId: userId });
+                        if (user && !user.joinedAll) {
+                            const unjoinedChannels = await getUnjoinedChannels(userId);
+                            if (unjoinedChannels.length === 0) {
+                                // User has joined all channels
+                                await db.collection('users').updateOne(
+                                    { userId: userId },
+                                    { $set: { joinedAll: true } }
+                                );
+                                console.log(`✅ User ${userId} has joined all channels`);
+                            }
+                        }
+                    } catch (error) {
+                        console.error('Error checking user status after approval:', error);
+                    }
+                }, 2000);
+                
+            } catch (error) {
+                console.error(`❌ Failed to approve join request for user ${userId}:`, error.message);
+                await notifyAdmin(`❌ <b>Join Request Failed</b>\n\n👤 User: ${userId}\n📺 Channel: ${channel.title}\n❌ Error: ${error.message}`);
+            }
+        } else {
+            console.log(`⚠️ Join request for unknown chat ${chatId}`);
+        }
+    } catch (error) {
+        console.error('Error in chat join request handler:', error);
+    }
+});
 
 // ==========================================
 // USER FLOW - START COMMAND
@@ -602,9 +657,6 @@ async function showStartScreen(ctx) {
         let startMessage = config?.startMessage || DEFAULT_CONFIG.startMessage;
         startMessage = replaceVariables(startMessage, userVars);
         
-        // Check if user is admin
-        const isUserAdmin = await isAdmin(userId);
-        
         // Create buttons
         const buttons = [];
         
@@ -620,11 +672,6 @@ async function showStartScreen(ctx) {
         } else {
             // All channels joined - show menu button
             buttons.push([{ text: '🎮 Go to Menu', callback_data: 'go_to_menu' }]);
-        }
-        
-        // Add admin button if admin
-        if (isUserAdmin) {
-            buttons.push([{ text: '👑 Admin Panel', callback_data: 'admin_panel' }]);
         }
         
         // Add contact admin button
@@ -807,12 +854,6 @@ async function showMainMenu(ctx) {
         // Add back button
         keyboard.push([{ text: '🔙 Back to Start', callback_data: 'back_to_start' }]);
         
-        // Add admin button if admin
-        const isUserAdmin = await isAdmin(userId);
-        if (isUserAdmin) {
-            keyboard.push([{ text: '👑 Admin Panel', callback_data: 'admin_panel' }]);
-        }
-        
         // Add contact admin button
         keyboard.push([{ text: '📞 Contact Admin', callback_data: 'contact_admin' }]);
         
@@ -858,7 +899,7 @@ bot.action('no_apps', async (ctx) => {
 });
 
 // ==========================================
-// APP CODE GENERATION - FIXED
+// APP CODE DISPLAY - MODIFIED: Admin adds codes manually
 // ==========================================
 
 bot.action(/^app_(.+)$/, async (ctx) => {
@@ -891,7 +932,7 @@ bot.action(/^app_(.+)$/, async (ctx) => {
             const timeStr = formatTimeRemaining(remaining);
             
             await safeSendMessage(ctx, 
-                `⏰ <b>Please Wait</b>\n\nYou can generate new codes for <b>${escapeMarkdown(app.name)}</b> in:\n<code>${timeStr}</code>`
+                `⏰ <b>Please Wait</b>\n\nYou can view codes for <b>${escapeMarkdown(app.name)}</b> in:\n<code>${timeStr}</code>`
             );
             
             await safeSendMessage(ctx, '🔙 Back to Menu', {
@@ -904,19 +945,6 @@ bot.action(/^app_(.+)$/, async (ctx) => {
             return;
         }
         
-        // Generate codes - FIXED: Proper generation
-        const codes = [];
-        const codeCount = app.codeCount || 1;
-        const codePrefixes = app.codePrefixes || [];
-        const codeLengths = app.codeLengths || [];
-        
-        for (let i = 0; i < codeCount; i++) {
-            const prefix = codePrefixes[i] || '';
-            const length = codeLengths[i] || 8;
-            const code = generateCode(prefix, length);
-            codes.push(code);
-        }
-        
         // Prepare variables
         const userVars = getUserVariables(ctx.from);
         const appVars = {
@@ -924,25 +952,23 @@ bot.action(/^app_(.+)$/, async (ctx) => {
             button_name: app.name
         };
         
-        // Add code variables
-        codes.forEach((code, index) => {
-            appVars[`code${index + 1}`] = `<code>${code}</code>`;
-        });
+        // Add code variables from manually added codes
+        let hasCodes = false;
+        if (app.codes && app.codes.length > 0) {
+            hasCodes = true;
+            app.codes.forEach((code, index) => {
+                appVars[`code${index + 1}`] = `<code>${code}</code>`;
+            });
+        }
         
         // Replace variables in message
         let message = app.codeMessage || 'Your code: {code1}';
         message = replaceVariables(message, userVars);
         message = replaceVariables(message, appVars);
         
-        // Format codes nicely
-        let formattedCodes = '';
-        codes.forEach((code, index) => {
-            formattedCodes += `• <code>${code}</code>\n`;
-        });
-        
-        // Add formatted codes to message
-        if (!message.includes('{code')) {
-            message += `\n\n${formattedCodes}`;
+        // If no codes were added by admin, show message
+        if (!hasCodes) {
+            message = '⚠️ <b>No codes available</b>\n\nPlease contact admin for codes.';
         }
         
         // Send app image if available
@@ -978,20 +1004,20 @@ bot.action(/^app_(.+)$/, async (ctx) => {
             { $set: { [`codeTimestamps.${appId}`]: now } }
         );
         
-        // Log code generation
-        console.log(`✅ Generated ${codes.length} codes for user ${userId}: ${codes.join(', ')}`);
+        // Log code view
+        console.log(`✅ User ${userId} viewed codes for app: ${app.name}`);
         
     } catch (error) {
         console.error('App selection error:', error);
         // Store error for reporting
         ctx.session.lastError = {
-            function: 'app_code_generation',
+            function: 'app_code_display',
             appId: ctx.match[1],
             error: error.message,
             stack: error.stack
         };
         
-        await safeSendMessage(ctx, '❌ An error occurred while generating codes. Please try again.', {
+        await safeSendMessage(ctx, '❌ An error occurred while displaying codes. Please try again.', {
             reply_markup: {
                 inline_keyboard: [[
                     { text: '🔙 Back to Menu', callback_data: 'back_to_menu' },
@@ -1016,32 +1042,7 @@ bot.action('back_to_menu', async (ctx) => {
 // 🛡️ ADMIN PANEL - FIXED
 // ==========================================
 
-// Admin panel from button - FIXED: Use command instead of callback
-bot.action('admin_panel', async (ctx) => {
-    try {
-        if (!await isAdmin(ctx.from.id)) {
-            return ctx.answerCbQuery('❌ You are not authorized');
-        }
-        
-        // Use command method to trigger admin panel
-        await ctx.deleteMessage().catch(() => {});
-        await bot.handleUpdate({
-            update_id: Date.now(),
-            message: {
-                message_id: Date.now(),
-                from: ctx.from,
-                chat: ctx.chat,
-                date: Math.floor(Date.now() / 1000),
-                text: '/admin'
-            }
-        });
-    } catch (error) {
-        console.error('Admin panel button error:', error);
-        await ctx.answerCbQuery('❌ Error loading admin panel');
-    }
-});
-
-// Admin command - FIXED: Proper error handling
+// Admin command - FIXED: Only works with /admin command
 bot.command('admin', async (ctx) => {
     try {
         if (!await isAdmin(ctx.from.id)) {
@@ -1483,8 +1484,10 @@ bot.action('admin_startimage', async (ctx) => {
     try {
         const config = await db.collection('admin').findOne({ type: 'config' });
         const currentImage = config?.startImage || DEFAULT_CONFIG.startImage;
+        const overlaySettings = config?.imageOverlaySettings || { startImage: true };
+        const hasOverlay = hasNameVariable(currentImage) || overlaySettings.startImage;
         
-        const text = `<b>🖼️ Start Image Management</b>\n\nCurrent Image:\n<code>${currentImage}</code>\n\nSelect an option:`;
+        const text = `<b>🖼️ Start Image Management</b>\n\nCurrent Image:\n<code>${currentImage}</code>\n\nOverlay: ${hasOverlay ? '✅ ON' : '❌ OFF'}\n\nSelect an option:`;
         
         const keyboard = [
             [{ text: '✏️ Edit URL', callback_data: 'admin_edit_startimage_url' }, { text: '📤 Upload', callback_data: 'admin_upload_startimage' }],
@@ -1523,9 +1526,30 @@ scenes.editStartImage.on('text', async (ctx) => {
             return;
         }
         
+        // Check if URL is valid image
+        const isValid = await isValidImageUrl(newUrl);
+        if (!isValid) {
+            await safeSendMessage(ctx, '⚠️ The URL does not appear to be a valid image.\n\nDo you still want to use it?', {
+                reply_markup: {
+                    inline_keyboard: [
+                        [{ text: '✅ Yes, use anyway', callback_data: `confirm_bad_url_start_${encodeURIComponent(newUrl)}` }],
+                        [{ text: '❌ No, cancel', callback_data: 'admin_startimage' }]
+                    ]
+                }
+            });
+            return;
+        }
+        
+        // Update database
         await db.collection('admin').updateOne(
             { type: 'config' },
-            { $set: { startImage: newUrl, updatedAt: new Date() } }
+            { 
+                $set: { 
+                    startImage: newUrl, 
+                    updatedAt: new Date(),
+                    'imageOverlaySettings.startImage': hasNameVariable(newUrl)
+                } 
+            }
         );
         
         await safeSendMessage(ctx, '✅ Start image URL updated!');
@@ -1535,6 +1559,31 @@ scenes.editStartImage.on('text', async (ctx) => {
         console.error('Edit start image error:', error);
         await safeSendMessage(ctx, '❌ Failed to update image.');
         await ctx.scene.leave();
+    }
+});
+
+// Handle confirmation for bad URLs
+bot.action(/^confirm_bad_url_start_(.+)$/, async (ctx) => {
+    try {
+        const url = decodeURIComponent(ctx.match[1]);
+        
+        await db.collection('admin').updateOne(
+            { type: 'config' },
+            { 
+                $set: { 
+                    startImage: url, 
+                    updatedAt: new Date(),
+                    'imageOverlaySettings.startImage': hasNameVariable(url)
+                } 
+            }
+        );
+        
+        await ctx.deleteMessage().catch(() => {});
+        await safeSendMessage(ctx, '✅ Start image URL updated!');
+        await showAdminPanel(ctx);
+    } catch (error) {
+        console.error('Confirm bad URL error:', error);
+        await safeSendMessage(ctx, '❌ Failed to update image.');
     }
 });
 
@@ -1640,7 +1689,11 @@ async function processImageUpload(ctx, addOverlay) {
         await db.collection('admin').updateOne(
             { type: 'config' },
             { 
-                $set: { ...updateField, updatedAt: new Date() },
+                $set: { 
+                    ...updateField, 
+                    updatedAt: new Date(),
+                    [`imageOverlaySettings.${imageType}`]: addOverlay
+                },
                 $push: { 
                     uploadedImages: {
                         url: cloudinaryUrl,
@@ -1652,19 +1705,6 @@ async function processImageUpload(ctx, addOverlay) {
                 }
             }
         );
-        
-        // Update overlay settings if needed
-        if (imageType === 'startImage') {
-            await db.collection('admin').updateOne(
-                { type: 'config' },
-                { $set: { 'imageOverlaySettings.startImage': addOverlay } }
-            );
-        } else if (imageType === 'menuImage') {
-            await db.collection('admin').updateOne(
-                { type: 'config' },
-                { $set: { 'imageOverlaySettings.menuImage': addOverlay } }
-            );
-        }
         
         await ctx.deleteMessage().catch(() => {});
         await safeSendMessage(ctx, `✅ Image uploaded and set as ${imageType.replace('Image', ' image')}!\n\nOverlay: ${addOverlay ? '✅ Yes' : '❌ No'}`);
@@ -1685,7 +1725,13 @@ bot.action('admin_reset_startimage', async (ctx) => {
     try {
         await db.collection('admin').updateOne(
             { type: 'config' },
-            { $set: { startImage: DEFAULT_CONFIG.startImage, updatedAt: new Date() } }
+            { 
+                $set: { 
+                    startImage: DEFAULT_CONFIG.startImage, 
+                    updatedAt: new Date(),
+                    'imageOverlaySettings.startImage': true
+                } 
+            }
         );
         
         await ctx.answerCbQuery('✅ Start image reset to default');
@@ -1710,7 +1756,7 @@ bot.action('admin_startmessage', async (ctx) => {
         // Use formatMessageForDisplay to show message properly
         const displayMessage = formatMessageForDisplay(currentMessage);
         
-        const text = `<b>📝 Start Message Management</b>\n\nCurrent Message:\n<code>${escapeMarkdown(displayMessage)}</code>\n\n<i>Available variables: {first_name}, {last_name}, {full_name}, {username}, {name}</i>\n\n<i>Supports HTML formatting</i>\n\nSelect an option:`;
+        const text = `<b>📝 Start Message Management</b>\n\nCurrent Message:\n<code>${escapeMarkdown(displayMessage)}</code>\n\nAvailable variables: {first_name}, {last_name}, {full_name}, {username}, {name}\n\nSupports HTML formatting\n\nSelect an option:`;
         
         const keyboard = [
             [{ text: '✏️ Edit', callback_data: 'admin_edit_startmessage' }, { text: '🔄 Reset', callback_data: 'admin_reset_startmessage' }],
@@ -1727,10 +1773,18 @@ bot.action('admin_startmessage', async (ctx) => {
 });
 
 bot.action('admin_edit_startmessage', async (ctx) => {
-    await safeSendMessage(ctx, 'Enter the new start message:\n\n<i>Supports HTML formatting</i>\n\nType "cancel" to cancel.', {
-        parse_mode: 'HTML'
-    });
-    await ctx.scene.enter('edit_start_message_scene');
+    try {
+        const config = await db.collection('admin').findOne({ type: 'config' });
+        const currentMessage = config?.startMessage || DEFAULT_CONFIG.startMessage;
+        
+        await safeSendMessage(ctx, `Current message:\n<code>${escapeMarkdown(formatMessageForDisplay(currentMessage))}</code>\n\nEnter the new start message:\n\n<i>Supports HTML formatting</i>\n\nType "cancel" to cancel.`, {
+            parse_mode: 'HTML'
+        });
+        await ctx.scene.enter('edit_start_message_scene');
+    } catch (error) {
+        console.error('Edit start message error:', error);
+        await safeSendMessage(ctx, '❌ An error occurred.');
+    }
 });
 
 scenes.editStartMessage.on('text', async (ctx) => {
@@ -1782,8 +1836,10 @@ bot.action('admin_menuimage', async (ctx) => {
     try {
         const config = await db.collection('admin').findOne({ type: 'config' });
         const currentImage = config?.menuImage || DEFAULT_CONFIG.menuImage;
+        const overlaySettings = config?.imageOverlaySettings || { menuImage: true };
+        const hasOverlay = hasNameVariable(currentImage) || overlaySettings.menuImage;
         
-        const text = `<b>🖼️ Menu Image Management</b>\n\nCurrent Image:\n<code>${currentImage}</code>\n\nSelect an option:`;
+        const text = `<b>🖼️ Menu Image Management</b>\n\nCurrent Image:\n<code>${currentImage}</code>\n\nOverlay: ${hasOverlay ? '✅ ON' : '❌ OFF'}\n\nSelect an option:`;
         
         const keyboard = [
             [{ text: '✏️ Edit URL', callback_data: 'admin_edit_menuimage_url' }, { text: '📤 Upload', callback_data: 'admin_upload_menuimage' }],
@@ -1822,9 +1878,29 @@ scenes.editMenuImage.on('text', async (ctx) => {
             return;
         }
         
+        // Check if URL is valid image
+        const isValid = await isValidImageUrl(newUrl);
+        if (!isValid) {
+            await safeSendMessage(ctx, '⚠️ The URL does not appear to be a valid image.\n\nDo you still want to use it?', {
+                reply_markup: {
+                    inline_keyboard: [
+                        [{ text: '✅ Yes, use anyway', callback_data: `confirm_bad_url_menu_${encodeURIComponent(newUrl)}` }],
+                        [{ text: '❌ No, cancel', callback_data: 'admin_menuimage' }]
+                    ]
+                }
+            });
+            return;
+        }
+        
         await db.collection('admin').updateOne(
             { type: 'config' },
-            { $set: { menuImage: newUrl, updatedAt: new Date() } }
+            { 
+                $set: { 
+                    menuImage: newUrl, 
+                    updatedAt: new Date(),
+                    'imageOverlaySettings.menuImage': hasNameVariable(newUrl)
+                } 
+            }
         );
         
         await safeSendMessage(ctx, '✅ Menu image URL updated!');
@@ -1834,6 +1910,31 @@ scenes.editMenuImage.on('text', async (ctx) => {
         console.error('Edit menu image error:', error);
         await safeSendMessage(ctx, '❌ Failed to update image.');
         await ctx.scene.leave();
+    }
+});
+
+// Handle confirmation for bad URLs
+bot.action(/^confirm_bad_url_menu_(.+)$/, async (ctx) => {
+    try {
+        const url = decodeURIComponent(ctx.match[1]);
+        
+        await db.collection('admin').updateOne(
+            { type: 'config' },
+            { 
+                $set: { 
+                    menuImage: url, 
+                    updatedAt: new Date(),
+                    'imageOverlaySettings.menuImage': hasNameVariable(url)
+                } 
+            }
+        );
+        
+        await ctx.deleteMessage().catch(() => {});
+        await safeSendMessage(ctx, '✅ Menu image URL updated!');
+        await showAdminPanel(ctx);
+    } catch (error) {
+        console.error('Confirm bad URL error:', error);
+        await safeSendMessage(ctx, '❌ Failed to update image.');
     }
 });
 
@@ -1848,7 +1949,13 @@ bot.action('admin_reset_menuimage', async (ctx) => {
     try {
         await db.collection('admin').updateOne(
             { type: 'config' },
-            { $set: { menuImage: DEFAULT_CONFIG.menuImage, updatedAt: new Date() } }
+            { 
+                $set: { 
+                    menuImage: DEFAULT_CONFIG.menuImage, 
+                    updatedAt: new Date(),
+                    'imageOverlaySettings.menuImage': true
+                } 
+            }
         );
         
         await ctx.answerCbQuery('✅ Menu image reset to default');
@@ -1873,7 +1980,7 @@ bot.action('admin_menumessage', async (ctx) => {
         // Use formatMessageForDisplay to show message properly
         const displayMessage = formatMessageForDisplay(currentMessage);
         
-        const text = `<b>📝 Menu Message Management</b>\n\nCurrent Message:\n<code>${escapeMarkdown(displayMessage)}</code>\n\n<i>Available variables: {first_name}, {last_name}, {full_name}, {username}, {name}</i>\n\n<i>Supports HTML formatting</i>\n\nSelect an option:`;
+        const text = `<b>📝 Menu Message Management</b>\n\nCurrent Message:\n<code>${escapeMarkdown(displayMessage)}</code>\n\nAvailable variables: {first_name}, {last_name}, {full_name}, {username}, {name}\n\nSupports HTML formatting\n\nSelect an option:`;
         
         const keyboard = [
             [{ text: '✏️ Edit', callback_data: 'admin_edit_menumessage' }, { text: '🔄 Reset', callback_data: 'admin_reset_menumessage' }],
@@ -1890,10 +1997,18 @@ bot.action('admin_menumessage', async (ctx) => {
 });
 
 bot.action('admin_edit_menumessage', async (ctx) => {
-    await safeSendMessage(ctx, 'Enter the new menu message:\n\n<i>Supports HTML formatting</i>\n\nType "cancel" to cancel.', {
-        parse_mode: 'HTML'
-    });
-    await ctx.scene.enter('edit_menu_message_scene');
+    try {
+        const config = await db.collection('admin').findOne({ type: 'config' });
+        const currentMessage = config?.menuMessage || DEFAULT_CONFIG.menuMessage;
+        
+        await safeSendMessage(ctx, `Current message:\n<code>${escapeMarkdown(formatMessageForDisplay(currentMessage))}</code>\n\nEnter the new menu message:\n\n<i>Supports HTML formatting</i>\n\nType "cancel" to cancel.`, {
+            parse_mode: 'HTML'
+        });
+        await ctx.scene.enter('edit_menu_message_scene');
+    } catch (error) {
+        console.error('Edit menu message error:', error);
+        await safeSendMessage(ctx, '❌ An error occurred.');
+    }
 });
 
 scenes.editMenuMessage.on('text', async (ctx) => {
@@ -2254,7 +2369,7 @@ scenes.editTimer.on('text', async (ctx) => {
 });
 
 // ==========================================
-// ADMIN FEATURES - CHANNEL MANAGEMENT
+// ADMIN FEATURES - CHANNEL MANAGEMENT (FIXED: Separate public/private)
 // ==========================================
 
 bot.action('admin_channels', async (ctx) => {
@@ -2270,7 +2385,8 @@ bot.action('admin_channels', async (ctx) => {
             text += 'No channels added yet.\n';
         } else {
             channels.forEach((channel, index) => {
-                text += `${index + 1}. ${channel.buttonLabel || channel.title} (${channel.type || 'public'})\n`;
+                const type = channel.type === 'private' ? '🔒' : '🔓';
+                text += `${index + 1}. ${type} ${channel.buttonLabel || channel.title} (${channel.type || 'public'})\n`;
             });
         }
         
@@ -2291,15 +2407,29 @@ bot.action('admin_channels', async (ctx) => {
     }
 });
 
-// Add Channel
+// Add Channel - Ask for type first
 bot.action('admin_add_channel', async (ctx) => {
     if (!await isAdmin(ctx.from.id)) return;
     
-    await safeSendMessage(ctx, 'Enter channel button name (e.g., "Join Main Channel"):\n\nType "cancel" to cancel.');
-    await ctx.scene.enter('add_channel_name_scene');
+    const text = '<b>➕ Add Channel</b>\n\nSelect channel type:';
+    const keyboard = [
+        [{ text: '🔓 Public Channel', callback_data: 'add_public_channel' }],
+        [{ text: '🔒 Private Channel', callback_data: 'add_private_channel' }],
+        [{ text: '🔙 Back', callback_data: 'admin_channels' }]
+    ];
+    
+    await safeEditMessage(ctx, text, {
+        reply_markup: { inline_keyboard: keyboard }
+    });
 });
 
-scenes.addChannelName.on('text', async (ctx) => {
+// Add Public Channel
+bot.action('add_public_channel', async (ctx) => {
+    await safeSendMessage(ctx, 'Enter channel button name (e.g., "Join Main Channel"):\n\nType "cancel" to cancel.');
+    await ctx.scene.enter('add_public_channel_name_scene');
+});
+
+scenes.addPublicChannelName.on('text', async (ctx) => {
     try {
         if (ctx.message.text.toLowerCase() === 'cancel') {
             await safeSendMessage(ctx, '❌ Add cancelled.');
@@ -2310,20 +2440,71 @@ scenes.addChannelName.on('text', async (ctx) => {
         
         // Store button label in session
         ctx.session.channelData = {
-            buttonLabel: ctx.message.text
+            buttonLabel: ctx.message.text,
+            type: 'public'
         };
         
-        await safeSendMessage(ctx, 'Now send the channel link (e.g., https://t.me/channelname or https://t.me/joinchat/xxxxxx):\n\nType "cancel" to cancel.');
+        await safeSendMessage(ctx, 'Now send the channel ID (e.g., @channelusername or -1001234567890):\n\nType "cancel" to cancel.');
         await ctx.scene.leave();
-        await ctx.scene.enter('add_channel_link_scene');
+        await ctx.scene.enter('add_public_channel_id_scene');
     } catch (error) {
-        console.error('Add channel name error:', error);
+        console.error('Add public channel name error:', error);
         await safeSendMessage(ctx, '❌ An error occurred.');
         await ctx.scene.leave();
     }
 });
 
-scenes.addChannelLink.on('text', async (ctx) => {
+scenes.addPublicChannelId.on('text', async (ctx) => {
+    try {
+        if (ctx.message.text.toLowerCase() === 'cancel') {
+            await safeSendMessage(ctx, '❌ Add cancelled.');
+            delete ctx.session.channelData;
+            await ctx.scene.leave();
+            await showAdminPanel(ctx);
+            return;
+        }
+        
+        if (!ctx.session.channelData) {
+            await safeSendMessage(ctx, '❌ Session expired. Please start again.');
+            await ctx.scene.leave();
+            await showAdminPanel(ctx);
+            return;
+        }
+        
+        const channelIdentifier = ctx.message.text.trim();
+        let channelId, channelTitle;
+        
+        try {
+            // Try to get chat info
+            const chat = await ctx.telegram.getChat(channelIdentifier);
+            channelId = chat.id;
+            channelTitle = chat.title || 'Unknown Channel';
+            
+            // Check if it's a channel/supergroup
+            if (chat.type !== 'channel' && chat.type !== 'supergroup') {
+                await safeSendMessage(ctx, '❌ This is not a channel or supergroup.');
+                return;
+            }
+            
+        } catch (error) {
+            await safeSendMessage(ctx, '❌ Cannot access this channel. Make sure:\n1. The bot is added to the channel\n2. Channel ID is correct\n3. For private channels, use the -100 format');
+            return;
+        }
+        
+        ctx.session.channelData.id = channelId;
+        ctx.session.channelData.title = channelTitle;
+        
+        await safeSendMessage(ctx, 'Now send the public channel link (e.g., https://t.me/channelusername):\n\nType "cancel" to cancel.');
+        await ctx.scene.leave();
+        await ctx.scene.enter('add_public_channel_link_scene');
+    } catch (error) {
+        console.error('Add public channel ID error:', error);
+        await safeSendMessage(ctx, '❌ An error occurred.');
+        await ctx.scene.leave();
+    }
+});
+
+scenes.addPublicChannelLink.on('text', async (ctx) => {
     try {
         if (ctx.message.text.toLowerCase() === 'cancel') {
             await safeSendMessage(ctx, '❌ Add cancelled.');
@@ -2348,111 +2529,15 @@ scenes.addChannelLink.on('text', async (ctx) => {
             return;
         }
         
-        ctx.session.channelData.link = link;
-        
-        await safeSendMessage(ctx, 'Now send the channel ID:\n\nFor public channels: @username\nFor private channels: -1001234567890\n\nYou can also forward a message from the channel.\n\n<i>Note: For private channels, the bot will accept join requests automatically.</i>\n\nType "cancel" to cancel.', {
-            parse_mode: 'HTML'
-        });
-        await ctx.scene.leave();
-        await ctx.scene.enter('add_channel_id_scene');
-    } catch (error) {
-        console.error('Add channel link error:', error);
-        await safeSendMessage(ctx, '❌ An error occurred.');
-        await ctx.scene.leave();
-    }
-});
-
-scenes.addChannelId.on(['text', 'forward_date'], async (ctx) => {
-    try {
-        if (!ctx.session.channelData) {
-            await safeSendMessage(ctx, '❌ Session expired. Please start again.');
-            await ctx.scene.leave();
-            await showAdminPanel(ctx);
-            return;
-        }
-        
-        const buttonLabel = ctx.session.channelData.buttonLabel;
-        const link = ctx.session.channelData.link;
-        let channelIdentifier;
-        
-        if (ctx.message.forward_from_chat) {
-            channelIdentifier = ctx.message.forward_from_chat.id;
-        } else if (ctx.message.text) {
-            channelIdentifier = ctx.message.text.trim();
-        } else {
-            await safeSendMessage(ctx, '❌ Please send a valid channel ID or forward a message.');
-            return;
-        }
-        
-        // Try to get chat info
-        let chat;
-        try {
-            chat = await ctx.telegram.getChat(channelIdentifier);
-        } catch (error) {
-            // If we can't access, it's likely a private channel
-            // Extract numeric ID
-            let numericId;
-            if (channelIdentifier.startsWith('-100')) {
-                numericId = channelIdentifier;
-            } else if (channelIdentifier.startsWith('@')) {
-                // Try to resolve username
-                try {
-                    chat = await ctx.telegram.getChat(channelIdentifier);
-                    numericId = chat.id;
-                } catch (err) {
-                    // Can't access, assume private channel
-                    numericId = channelIdentifier;
-                }
-            } else {
-                // Try to parse as numeric ID
-                numericId = `-100${channelIdentifier}`;
-            }
-            
-            // Create channel object for private channel
-            const newChannel = {
-                id: numericId,
-                title: `Private Channel ${numericId}`,
-                buttonLabel: buttonLabel,
-                link: link,
-                type: 'private',
-                addedAt: new Date()
-            };
-            
-            // Add to database
-            await db.collection('admin').updateOne(
-                { type: 'config' },
-                { $push: { channels: newChannel } }
-            );
-            
-            await safeSendMessage(ctx, `✅ <b>Private channel added successfully!</b>\n\n• <b>Name:</b> ${buttonLabel}\n• <b>ID:</b> <code>${numericId}</code>\n• <b>Link:</b> ${link}\n\n<i>Note: Users will need to join via link. Bot will accept join requests automatically.</i>`, {
-                parse_mode: 'HTML'
-            });
-            
-            delete ctx.session.channelData;
-            await ctx.scene.leave();
-            await showAdminPanel(ctx);
-            return;
-        }
-        
-        // Check if bot is admin (optional for public channels)
-        let isBotAdmin = false;
-        try {
-            const member = await ctx.telegram.getChatMember(chat.id, ctx.botInfo.id);
-            isBotAdmin = member.status === 'administrator';
-        } catch (error) {
-            // If we can't check, it's okay for public channels
-            isBotAdmin = false;
-        }
+        const channelData = ctx.session.channelData;
         
         // Create channel object
         const newChannel = {
-            id: chat.id,
-            title: chat.title || 'Unknown Channel',
-            buttonLabel: buttonLabel,
+            id: channelData.id,
+            title: channelData.title,
+            buttonLabel: channelData.buttonLabel,
             link: link,
-            type: chat.username ? 'public' : 'private',
-            username: chat.username,
-            isBotAdmin: isBotAdmin,
+            type: 'public',
             addedAt: new Date()
         };
         
@@ -2462,15 +2547,7 @@ scenes.addChannelId.on(['text', 'forward_date'], async (ctx) => {
             { $push: { channels: newChannel } }
         );
         
-        let responseText = `✅ <b>Channel added successfully!</b>\n\n• <b>Name:</b> ${buttonLabel}\n• <b>Title:</b> ${chat.title}\n• <b>ID:</b> <code>${chat.id}</code>\n• <b>Link:</b> ${link}\n• <b>Type:</b> ${chat.username ? 'public' : 'private'}`;
-        
-        if (!isBotAdmin && !chat.username) {
-            responseText += `\n\n⚠️ <b>Warning:</b> Bot is not admin in this private channel. Users may need to join manually.`;
-        } else if (isBotAdmin) {
-            responseText += `\n\n✅ Bot is admin in this channel and will check user membership.`;
-        }
-        
-        await safeSendMessage(ctx, responseText, {
+        await safeSendMessage(ctx, `✅ <b>Public channel added successfully!</b>\n\n• <b>Name:</b> ${channelData.buttonLabel}\n• <b>Title:</b> ${channelData.title}\n• <b>ID:</b> <code>${channelData.id}</code>\n• <b>Link:</b> ${link}`, {
             parse_mode: 'HTML'
         });
         
@@ -2478,7 +2555,138 @@ scenes.addChannelId.on(['text', 'forward_date'], async (ctx) => {
         delete ctx.session.channelData;
         
     } catch (error) {
-        console.error('Add channel error:', error);
+        console.error('Add public channel error:', error);
+        await safeSendMessage(ctx, `❌ Error: ${error.message}\n\nPlease try again.`);
+        delete ctx.session.channelData;
+    }
+    
+    await ctx.scene.leave();
+    await showAdminPanel(ctx);
+});
+
+// Add Private Channel
+bot.action('add_private_channel', async (ctx) => {
+    await safeSendMessage(ctx, 'Enter channel button name (e.g., "Join Private Group"):\n\nType "cancel" to cancel.');
+    await ctx.scene.enter('add_private_channel_name_scene');
+});
+
+scenes.addPrivateChannelName.on('text', async (ctx) => {
+    try {
+        if (ctx.message.text.toLowerCase() === 'cancel') {
+            await safeSendMessage(ctx, '❌ Add cancelled.');
+            await ctx.scene.leave();
+            await showAdminPanel(ctx);
+            return;
+        }
+        
+        // Store button label in session
+        ctx.session.channelData = {
+            buttonLabel: ctx.message.text,
+            type: 'private'
+        };
+        
+        await safeSendMessage(ctx, 'Now send the private channel ID (e.g., -1001234567890):\n\nType "cancel" to cancel.');
+        await ctx.scene.leave();
+        await ctx.scene.enter('add_private_channel_id_scene');
+    } catch (error) {
+        console.error('Add private channel name error:', error);
+        await safeSendMessage(ctx, '❌ An error occurred.');
+        await ctx.scene.leave();
+    }
+});
+
+scenes.addPrivateChannelId.on('text', async (ctx) => {
+    try {
+        if (ctx.message.text.toLowerCase() === 'cancel') {
+            await safeSendMessage(ctx, '❌ Add cancelled.');
+            delete ctx.session.channelData;
+            await ctx.scene.leave();
+            await showAdminPanel(ctx);
+            return;
+        }
+        
+        if (!ctx.session.channelData) {
+            await safeSendMessage(ctx, '❌ Session expired. Please start again.');
+            await ctx.scene.leave();
+            await showAdminPanel(ctx);
+            return;
+        }
+        
+        const channelId = ctx.message.text.trim();
+        
+        // Validate channel ID format
+        if (!channelId.startsWith('-100')) {
+            await safeSendMessage(ctx, '❌ Invalid private channel ID. Must start with -100');
+            return;
+        }
+        
+        ctx.session.channelData.id = channelId;
+        ctx.session.channelData.title = `Private Channel ${channelId}`;
+        
+        await safeSendMessage(ctx, 'Now send the private channel invite link (e.g., https://t.me/joinchat/xxxxxx):\n\n<i>Note: Bot will automatically accept join requests for this channel</i>\n\nType "cancel" to cancel.', {
+            parse_mode: 'HTML'
+        });
+        await ctx.scene.leave();
+        await ctx.scene.enter('add_private_channel_link_scene');
+    } catch (error) {
+        console.error('Add private channel ID error:', error);
+        await safeSendMessage(ctx, '❌ An error occurred.');
+        await ctx.scene.leave();
+    }
+});
+
+scenes.addPrivateChannelLink.on('text', async (ctx) => {
+    try {
+        if (ctx.message.text.toLowerCase() === 'cancel') {
+            await safeSendMessage(ctx, '❌ Add cancelled.');
+            delete ctx.session.channelData;
+            await ctx.scene.leave();
+            await showAdminPanel(ctx);
+            return;
+        }
+        
+        if (!ctx.session.channelData) {
+            await safeSendMessage(ctx, '❌ Session expired. Please start again.');
+            await ctx.scene.leave();
+            await showAdminPanel(ctx);
+            return;
+        }
+        
+        const link = ctx.message.text.trim();
+        
+        // Validate link
+        if (!link.startsWith('https://t.me/')) {
+            await safeSendMessage(ctx, '❌ Invalid Telegram link. Must start with https://t.me/');
+            return;
+        }
+        
+        const channelData = ctx.session.channelData;
+        
+        // Create channel object
+        const newChannel = {
+            id: channelData.id,
+            title: channelData.title,
+            buttonLabel: channelData.buttonLabel,
+            link: link,
+            type: 'private',
+            addedAt: new Date()
+        };
+        
+        // Add to database
+        await db.collection('admin').updateOne(
+            { type: 'config' },
+            { $push: { channels: newChannel } }
+        );
+        
+        await safeSendMessage(ctx, `✅ <b>Private channel added successfully!</b>\n\n• <b>Name:</b> ${channelData.buttonLabel}\n• <b>ID:</b> <code>${channelData.id}</code>\n• <b>Link:</b> ${link}\n\n<i>Note: Users will need to join via link. Bot will accept join requests automatically.</i>`, {
+            parse_mode: 'HTML'
+        });
+        
+        // Clear session
+        delete ctx.session.channelData;
+        
+    } catch (error) {
+        console.error('Add private channel error:', error);
         await safeSendMessage(ctx, `❌ Error: ${error.message}\n\nPlease try again.`);
         delete ctx.session.channelData;
     }
@@ -2502,8 +2710,9 @@ bot.action('admin_delete_channel', async (ctx) => {
         const keyboard = [];
         
         channels.forEach((channel, index) => {
+            const type = channel.type === 'private' ? '🔒' : '🔓';
             keyboard.push([{ 
-                text: `${index + 1}. ${channel.buttonLabel || channel.title}`, 
+                text: `${index + 1}. ${type} ${channel.buttonLabel || channel.title}`, 
                 callback_data: `delete_channel_${channel.id}` 
             }]);
         });
@@ -2541,7 +2750,7 @@ bot.action(/^delete_channel_(.+)$/, async (ctx) => {
 });
 
 // ==========================================
-// ADMIN FEATURES - APP MANAGEMENT (FIXED: {name} tag for app images with option)
+// ADMIN FEATURES - APP MANAGEMENT (MODIFIED: Admin adds codes manually)
 // ==========================================
 
 bot.action('admin_apps', async (ctx) => {
@@ -2557,7 +2766,8 @@ bot.action('admin_apps', async (ctx) => {
             text += 'No apps added yet.\n';
         } else {
             apps.forEach((app, index) => {
-                text += `${index + 1}. ${app.name} (${app.codeCount || 1} codes)\n`;
+                const codeCount = app.codes ? app.codes.length : 0;
+                text += `${index + 1}. ${app.name} (${codeCount} codes)\n`;
             });
         }
         
@@ -2664,19 +2874,59 @@ scenes.addAppImage.on(['text', 'photo'], async (ctx) => {
                 }
             );
         } else if (ctx.message.text) {
-            ctx.session.appData.image = ctx.message.text;
+            const url = ctx.message.text.trim();
+            
+            // Check if URL is valid image
+            const isValid = await isValidImageUrl(url);
+            if (!isValid) {
+                await safeSendMessage(ctx, '⚠️ The URL does not appear to be a valid image.\n\nDo you still want to use it?', {
+                    reply_markup: {
+                        inline_keyboard: [
+                            [{ text: '✅ Yes, use anyway', callback_data: `confirm_bad_url_app_${encodeURIComponent(url)}` }],
+                            [{ text: '❌ No, cancel', callback_data: 'admin_apps' }]
+                        ]
+                    }
+                });
+                return;
+            }
+            
+            ctx.session.appData.image = url;
+            ctx.session.appData.hasOverlay = hasNameVariable(url);
         } else {
             await safeSendMessage(ctx, '❌ Please send an image or "none".');
             return;
         }
         
-        await safeSendMessage(ctx, 'How many codes to generate? (1-10):');
+        await safeSendMessage(ctx, 'How many codes do you want to add? (1-10):\n\n<i>You will enter each code manually</i>', {
+            parse_mode: 'HTML'
+        });
         await ctx.scene.leave();
         await ctx.scene.enter('add_app_code_count_scene');
     } catch (error) {
         console.error('Add app image error:', error);
         await safeSendMessage(ctx, '❌ Failed to process image. Please try again.');
         await ctx.scene.leave();
+    }
+});
+
+// Handle confirmation for bad app image URLs
+bot.action(/^confirm_bad_url_app_(.+)$/, async (ctx) => {
+    try {
+        const url = decodeURIComponent(ctx.match[1]);
+        
+        if (ctx.session.appData) {
+            ctx.session.appData.image = url;
+            ctx.session.appData.hasOverlay = hasNameVariable(url);
+            
+            await ctx.deleteMessage().catch(() => {});
+            await safeSendMessage(ctx, 'How many codes do you want to add? (1-10):\n\n<i>You will enter each code manually</i>', {
+                parse_mode: 'HTML'
+            });
+            await ctx.scene.enter('add_app_code_count_scene');
+        }
+    } catch (error) {
+        console.error('Confirm bad app URL error:', error);
+        await safeSendMessage(ctx, '❌ An error occurred.');
     }
 });
 
@@ -2696,10 +2946,13 @@ scenes.addAppCodeCount.on('text', async (ctx) => {
         }
         
         ctx.session.appData.codeCount = count;
+        ctx.session.appData.codes = []; // Initialize empty codes array
         
-        await safeSendMessage(ctx, 'Enter prefixes for each code (separated by commas):\nExample: XY,AB,CD\nLeave empty for no prefixes.');
+        await safeSendMessage(ctx, `Now enter code #1:\n\n<i>You'll enter ${count} codes total</i>`, {
+            parse_mode: 'HTML'
+        });
         await ctx.scene.leave();
-        await ctx.scene.enter('add_app_code_prefixes_scene');
+        await ctx.scene.enter('add_app_codes_scene');
     } catch (error) {
         console.error('Add app code count error:', error);
         await safeSendMessage(ctx, '❌ An error occurred.');
@@ -2707,7 +2960,8 @@ scenes.addAppCodeCount.on('text', async (ctx) => {
     }
 });
 
-scenes.addAppCodePrefixes.on('text', async (ctx) => {
+// New scene for adding codes manually
+scenes.addAppCodes.on('text', async (ctx) => {
     try {
         if (!ctx.session.appData) {
             await safeSendMessage(ctx, '❌ Session expired. Please start again.');
@@ -2716,38 +2970,37 @@ scenes.addAppCodePrefixes.on('text', async (ctx) => {
             return;
         }
         
-        const prefixes = ctx.message.text.split(',').map(p => p.trim()).filter(p => p);
-        ctx.session.appData.codePrefixes = prefixes;
-        
-        await safeSendMessage(ctx, 'Enter code lengths for each code (separated by commas, min 6):\nExample: 8,10,12\nDefault is 8 for all codes.');
-        await ctx.scene.leave();
-        await ctx.scene.enter('add_app_code_lengths_scene');
-    } catch (error) {
-        console.error('Add app prefixes error:', error);
-        await safeSendMessage(ctx, '❌ An error occurred.');
-        await ctx.scene.leave();
-    }
-});
-
-scenes.addAppCodeLengths.on('text', async (ctx) => {
-    try {
-        if (!ctx.session.appData) {
-            await safeSendMessage(ctx, '❌ Session expired. Please start again.');
-            await ctx.scene.leave();
-            await showAdminPanel(ctx);
+        const code = ctx.message.text.trim();
+        if (!code) {
+            await safeSendMessage(ctx, '❌ Please enter a valid code.');
             return;
         }
         
-        const lengths = ctx.message.text.split(',').map(l => parseInt(l.trim())).filter(l => !isNaN(l) && l >= 6);
-        ctx.session.appData.codeLengths = lengths;
+        // Store the code
+        if (!ctx.session.appData.codes) {
+            ctx.session.appData.codes = [];
+        }
         
-        await safeSendMessage(ctx, 'Enter the code message template:\n\n<b>Available variables:</b>\n{first_name}, {last_name}, {full_name}, {username}, {name}\n{app_name}, {button_name}\n{code1}, {code2}, ... {code10}\n\n<i>Supports HTML formatting</i>\n\nExample: "Your codes for {app_name} are:\n{code1}\n{code2}"', {
-            parse_mode: 'HTML'
-        });
-        await ctx.scene.leave();
-        await ctx.scene.enter('add_app_code_message_scene');
+        ctx.session.appData.codes.push(code);
+        
+        const enteredCount = ctx.session.appData.codes.length;
+        const totalCount = ctx.session.appData.codeCount;
+        
+        if (enteredCount < totalCount) {
+            // Ask for next code
+            await safeSendMessage(ctx, `Enter code #${enteredCount + 1}:\n\n<i>${enteredCount}/${totalCount} codes entered</i>`, {
+                parse_mode: 'HTML'
+            });
+        } else {
+            // All codes entered, ask for message template
+            await safeSendMessage(ctx, 'All codes entered! Now enter the code message template:\n\n<b>Available variables:</b>\n{first_name}, {last_name}, {full_name}, {username}, {name}\n{app_name}, {button_name}\n{code1}, {code2}, ... {code10}\n\n<i>Supports HTML formatting</i>\n\nExample: "Your codes for {app_name} are:\n{code1}\n{code2}"', {
+                parse_mode: 'HTML'
+            });
+            await ctx.scene.leave();
+            await ctx.scene.enter('add_app_code_message_scene');
+        }
     } catch (error) {
-        console.error('Add app lengths error:', error);
+        console.error('Add app codes error:', error);
         await safeSendMessage(ctx, '❌ An error occurred.');
         await ctx.scene.leave();
     }
@@ -2769,23 +3022,13 @@ scenes.addAppCodeMessage.on('text', async (ctx) => {
             id: `app_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
             name: appData.name,
             image: appData.image || 'none',
-            codeCount: appData.codeCount || 1,
-            codePrefixes: appData.codePrefixes || [],
-            codeLengths: appData.codeLengths || Array(appData.codeCount || 1).fill(8),
-            codeMessage: ctx.message.text || 'Your code: {code1}',
+            codes: appData.codes || [],
+            codeCount: appData.codes ? appData.codes.length : 0,
+            codeMessage: ctx.message.text || 'Your codes: {code1}',
             cloudinaryId: appData.cloudinaryId,
             hasOverlay: appData.hasOverlay || false,
             createdAt: new Date()
         };
-        
-        // Ensure arrays have correct length
-        while (app.codePrefixes.length < app.codeCount) {
-            app.codePrefixes.push('');
-        }
-        
-        while (app.codeLengths.length < app.codeCount) {
-            app.codeLengths.push(8);
-        }
         
         // Add to database
         await db.collection('admin').updateOne(
@@ -2793,7 +3036,13 @@ scenes.addAppCodeMessage.on('text', async (ctx) => {
             { $push: { apps: app } }
         );
         
-        await safeSendMessage(ctx, `✅ <b>App "${app.name}" added successfully!</b>\n\n• <b>Codes:</b> ${app.codeCount}\n• <b>Image:</b> ${app.image === 'none' ? 'None' : 'Set'}\n• <b>Overlay:</b> ${app.hasOverlay ? 'Yes' : 'No'}\n• <b>Prefixes:</b> ${app.codePrefixes.filter(p => p).join(', ') || 'None'}\n• <b>Lengths:</b> ${app.codeLengths.join(', ')}`, {
+        // Format codes for display
+        let codesDisplay = '';
+        app.codes.forEach((code, index) => {
+            codesDisplay += `• <code>${code}</code>\n`;
+        });
+        
+        await safeSendMessage(ctx, `✅ <b>App "${app.name}" added successfully!</b>\n\n• <b>Codes:</b> ${app.codeCount}\n• <b>Image:</b> ${app.image === 'none' ? 'None' : 'Set'}\n• <b>Overlay:</b> ${app.hasOverlay ? 'Yes' : 'No'}\n\n<b>Codes added:</b>\n${codesDisplay}`, {
             parse_mode: 'HTML'
         });
         
